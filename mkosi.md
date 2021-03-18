@@ -401,6 +401,14 @@ details see the table below.
   will only be able to run on the system mkosi is run on. Currently mkosi uses dracut for all supported
   distributions except Clear Linux and this option translates to enabling dracut's hostonly option.
 
+`--usr-only`
+
+: If specified, mkosi will only add the `/usr` subtree instead of the whole root
+  fs. This is usefule for truly stateless systems that come up pristine on every
+  single boot, where `/etc` and `/var` are populated by tmpfiles/sysusers and
+  related calls, or systems that are shipped without root fs, but where
+  systemd-repart adds one in.
+
 `--no-chown`
 
 : By default, if `mkosi` is run inside a `sudo` environment all
@@ -851,6 +859,7 @@ which settings file options.
 | `--hostname=`                     | `[Output]`              | `Hostname=`                   |
 | `--without-unified-kernel-images` | `[Output]`              | `WithUnifiedKernelImages=`    |
 | `--hostonly-initrd`               | `[Output]`              | `HostonlyInitrd=`             |
+| `--usr-only`                      | `[Output]`              | `UsrOnly=`                    |
 | `--package=`                      | `[Packages]`            | `Packages=`                   |
 | `--with-docs`                     | `[Packages]`            | `WithDocs=`                   |
 | `--without-tests`, `-T`           | `[Packages]`            | `WithTests=`                  |
