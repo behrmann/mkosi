@@ -528,10 +528,24 @@ a boolean argument: either "1", "yes", or "true" to enable, or "0",
 
 `Verity=`, `--verity`
 
-: Add an "Verity" integrity partition to the image. If enabled, the
-  root partition is protected with `dm-verity` against off-line
+: Add an "Verity" integrity partition to the image. Takes a boolean or
+  the special value `signed`, and defaults to disabled. If enabled,
+  the root partition (or `/usr/` partition, inc ase `UsrOnly=` is
+  enabled) is protected with `dm-verity` against off-line
   modification, the verification data is placed in an additional GPT
-  partition. Implies `ReadOnly=yes`.
+  partition. Implies `ReadOnly=yes`. If this is enabled the Verity
+  root hash is written to an output file with `.roothash` or
+  `.usrhash` suffix. If set to `signed` Verity is also enabled, but
+  the resulting root hash is then also signed (in PKCS#7 format) with
+  the signature key configured with `SecureBootKey=` (or in other
+  words: the SecureBoot key pair is then both used to sign the kernel,
+  if that's enabled, and the root/`/usr/` file system). This signature
+  is then stored in an additiona output file with the `.roothash.p7s`
+  or `.usrhash.p7s` suffix in DER format. It is also written to an
+  additional partition in the image. The latter allows generating
+  self-contained signed disk images, implementing the Verity
+  provisions described in the [Discoverable Partitions
+  Specification](https://systemd.io/DISCOVERABLE_PARTITIONS).
 
 `CompressFs=`, `--compress-fs=`
 
