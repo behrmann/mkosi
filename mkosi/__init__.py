@@ -326,8 +326,8 @@ def format_bytes(num_bytes: int) -> str:
     return f"{num_bytes}B"
 
 
-def roundup512(x: int) -> int:
-    return (x + 511) & ~511
+def roundup(x: int, step: int) -> int:
+    return ((x + step - 1) // step) * step
 
 
 _IOC_NRBITS   =  8  # NOQA: E221,E222
@@ -3479,7 +3479,7 @@ def insert_partition(
         old_table = []
         last_partition_sector = GPT_HEADER_SIZE
 
-    blob_size = roundup512(os.stat(blob.name).st_size)
+    blob_size = roundup(os.stat(blob.name).st_size, 512)
     luks_extra = 16 * 1024 * 1024 if args.encrypt == "all" else 0
     new_size = last_partition_sector + blob_size + luks_extra + GPT_FOOTER_SIZE
 
