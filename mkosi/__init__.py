@@ -3620,7 +3620,7 @@ def copy_git_files(src: Path, dest: Path, *, source_file_transfer: SourceFileTra
     c = run(["git", "-C", src, "submodule", "status", "--recursive"], stdout=PIPE, text=True)
     submodules = {x.split()[1] for x in c.stdout.splitlines()}
 
-    # workaround for git-ls-files returning the path of submodules that we will
+    # workaround for git ls-files returning the path of submodules that we will
     # still parse
     files -= submodules
 
