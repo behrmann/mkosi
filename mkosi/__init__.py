@@ -5205,15 +5205,15 @@ def create_parser() -> ArgumentParserMkosi:
     group.add_argument("-r", "--release", help="Distribution release to install")
     group.add_argument("-m", "--mirror", help="Distribution mirror to use")
     group.add_argument(
-        '--repositories',
-        metavar='REPOS',
+        "--repositories",
+        metavar="REPOS",
         action=CommaDelimitedListAction,
         default=[],
-        help='Repositories to use',
+        help="Repositories to use",
     )
     group.add_argument(
-        '--use-host-repositories',
-        metavar='BOOL',
+        "--use-host-repositories",
+        metavar="BOOL",
         action=BooleanAction,
         help="Use host's existing software repositories (only for dnf-based distributions)",
     )
@@ -5223,43 +5223,43 @@ def create_parser() -> ArgumentParserMkosi:
 
     group = parser.add_argument_group("Output")
     group.add_argument(
-        '-t', '--format',
-        dest='output_format',
+        "-t", "--format",
+        dest="output_format",
         choices=OutputFormat,
         type=OutputFormat.from_string,
-        metavar='FORMAT',
-        help='Output Format',
+        metavar="FORMAT",
+        help="Output Format",
     )
     group.add_argument(
-        '--manifest-format',
+        "--manifest-format",
         action=CommaDelimitedListAction,
         type=cast(Callable[[str], ManifestFormat], ManifestFormat.parse_list),
-        metavar='FORMAT',
-        help='Manifest Format',
+        metavar="FORMAT",
+        help="Manifest Format",
     )
     group.add_argument(
-        '-o', '--output',
-        help='Output image path',
+        "-o", "--output",
+        help="Output image path",
         type=Path,
-        metavar='PATH',
+        metavar="PATH",
     )
     group.add_argument(
-        '--output-split-root',
-        help='Output root or /usr/ partition image path (if --split-artifacts is used)',
+        "--output-split-root",
+        help="Output root or /usr/ partition image path (if --split-artifacts is used)",
         type=Path,
-        metavar='PATH',
+        metavar="PATH",
     )
     group.add_argument(
-        '--output-split-verity',
-        help='Output Verity partition image path (if --split-artifacts is used)',
+        "--output-split-verity",
+        help="Output Verity partition image path (if --split-artifacts is used)",
         type=Path,
-        metavar='PATH',
+        metavar="PATH",
     )
     group.add_argument(
-        '--output-split-verity-sig',
-        help='Output Verity Signature partition image path (if --split-artifacts is used)',
+        "--output-split-verity-sig",
+        help="Output Verity Signature partition image path (if --split-artifacts is used)",
         type=Path,
-        metavar='PATH',
+        metavar="PATH",
     )
     group.add_argument(
         "--output-split-kernel",
@@ -5287,10 +5287,10 @@ def create_parser() -> ArgumentParserMkosi:
         help="Remove existing image file before operation",
     )
     group.add_argument(
-        '-b', '--bootable',
-        metavar='BOOL',
+        "-b", "--bootable",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Make image bootable on EFI (only gpt_ext4, gpt_xfs, gpt_btrfs, gpt_squashfs)',
+        help="Make image bootable on EFI (only gpt_ext4, gpt_xfs, gpt_btrfs, gpt_squashfs)",
     )
     group.add_argument(
         "--boot-protocols",
@@ -5310,10 +5310,10 @@ def create_parser() -> ArgumentParserMkosi:
         "--kernel-commandline", action=SpaceDelimitedListAction, dest="kernel_command_line", help=argparse.SUPPRESS
     )  # Compatibility option
     group.add_argument(
-        '--secure-boot',
-        metavar='BOOL',
+        "--secure-boot",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Sign the resulting kernel/initrd image for UEFI SecureBoot',
+        help="Sign the resulting kernel/initrd image for UEFI SecureBoot",
     )
     group.add_argument(
         "--secure-boot-key",
@@ -5340,10 +5340,10 @@ def create_parser() -> ArgumentParserMkosi:
         default="mkosi of %u",
     )
     group.add_argument(
-        '--read-only',
+        "--read-only",
         action=BooleanAction,
-        metavar='BOOL',
-        help='Make root volume read-only (only gpt_ext4, gpt_xfs, gpt_btrfs, subvolume, implied with gpt_squashfs and plain_squashfs)',
+        metavar="BOOL",
+        help="Make root volume read-only (only gpt_ext4, gpt_xfs, gpt_btrfs, subvolume, implied with gpt_squashfs and plain_squashfs)",
     )
     group.add_argument(
         "--encrypt", choices=("all", "data"), help='Encrypt everything except: ESP ("all") or ESP and root ("data")'
@@ -5385,37 +5385,37 @@ def create_parser() -> ArgumentParserMkosi:
         help=argparse.SUPPRESS,
     )
     group.add_argument(
-        '--qcow2',
+        "--qcow2",
         action=BooleanAction,
-        metavar='BOOL',
-        help='Convert resulting image to qcow2 (only gpt_ext4, gpt_xfs, gpt_btrfs, gpt_squashfs)',
+        metavar="BOOL",
+        help="Convert resulting image to qcow2 (only gpt_ext4, gpt_xfs, gpt_btrfs, gpt_squashfs)",
     )
     group.add_argument("--hostname", help="Set hostname")
     group.add_argument("--image-version", help="Set version for image")
     group.add_argument("--image-id", help="Set ID for image")
     group.add_argument(
-        '--no-chown',
-        metavar='BOOL',
+        "--no-chown",
+        metavar="BOOL",
         action=BooleanAction,
-        help='When running with sudo, disable reassignment of ownership of the generated files to the original user',
+        help="When running with sudo, disable reassignment of ownership of the generated files to the original user",
     )  # NOQA: E501
     group.add_argument(
-        '--tar-strip-selinux-context',
-        metavar='BOOL',
+        "--tar-strip-selinux-context",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Do not include SELinux file context information in tar. Not compatible with bsdtar.',
+        help="Do not include SELinux file context information in tar. Not compatible with bsdtar.",
     )
     group.add_argument(
-        '-i', '--incremental',
-        metavar='BOOL',
+        "-i", "--incremental",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Make use of and generate intermediary cache images'
+        help="Make use of and generate intermediary cache images",
     )
     group.add_argument(
-        '-M', '--minimize',
-        metavar='BOOL',
+        "-M", "--minimize",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Minimize root file system size',
+        help="Minimize root file system size",
     )
     group.add_argument(
         "--without-unified-kernel-images",
@@ -5486,21 +5486,21 @@ def create_parser() -> ArgumentParserMkosi:
         "--with-tests", action=BooleanAction, default=True, help=argparse.SUPPRESS
     )  # Compatibility option
     group.add_argument(
-        '--machine-id',
-        help='Defines a fixed machine ID for all our build-time runs.',
+        "--machine-id",
+        help="Defines a fixed machine ID for all our build-time runs.",
     )
     group.add_argument("--password", help="Set the root password")
     group.add_argument(
-        '--password-is-hashed',
-        metavar='BOOL',
+        "--password-is-hashed",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Indicate that the root password has already been hashed',
+        help="Indicate that the root password has already been hashed",
     )
     group.add_argument(
-        '--autologin',
-        metavar='BOOL',
+        "--autologin",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Enable root autologin',
+        help="Enable root autologin",
     )
     group.add_argument(
         "--cache",
@@ -5629,29 +5629,29 @@ def create_parser() -> ArgumentParserMkosi:
         metavar="PATH",
     )
     group.add_argument(
-        '--source-file-transfer',
+        "--source-file-transfer",
         type=parse_source_file_transfer,
         choices=[*list(SourceFileTransfer), None],
-        metavar='METHOD',
+        metavar="METHOD",
         default=None,
-        help='\n'.join(('How to copy build sources to the build image:',
+        help='\n'.join(("How to copy build sources to the build image:",
                         *(f"'{k}': {v}" for k, v in SourceFileTransfer.doc().items()),
-                        '(default: copy-git-others if in a git repository, otherwise copy-all)')),
+                        "(default: copy-git-others if in a git repository, otherwise copy-all)")),
     )
     group.add_argument(
-        '--source-file-transfer-final',
+        "--source-file-transfer-final",
         type=parse_source_file_transfer,
         choices=[*list(SourceFileTransfer), None],
-        metavar='METHOD',
+        metavar="METHOD",
         default=None,
-        help='\n'.join(('How to copy build sources to the final image:',
+        help='\n'.join(("How to copy build sources to the final image:",
                         *(f"'{k}': {v}" for k, v in SourceFileTransfer.doc().items()
                           if k != SourceFileTransfer.mount),
-                        '(default: None)')),
+                        "(default: None)")),
     )
     group.add_argument(
-        '--source-resolve-symlinks',
-        metavar='BOOL',
+        "--source-resolve-symlinks",
+        metavar="BOOL",
         action=BooleanAction,
         help=("If true, symbolic links in the build sources are followed and the "
               "file contents copied to the build image. If false, they are left as "
@@ -5660,8 +5660,8 @@ def create_parser() -> ArgumentParserMkosi:
               "(default: false)"),
     )
     group.add_argument(
-        '--source-resolve-symlinks-final',
-        metavar='BOOL',
+        "--source-resolve-symlinks-final",
+        metavar="BOOL",
         action=BooleanAction,
         help=("If true, symbolic links in the build sources are followed and the "
               "file contents copied to the final image. If false, they are left as "
@@ -5683,10 +5683,10 @@ def create_parser() -> ArgumentParserMkosi:
     )
 
     group = parser.add_argument_group("Partitions")
-    group.add_argument('--base-image',
-                       help='Use the given image as base (e.g. lower sysext layer)',
+    group.add_argument("--base-image",
+                       help="Use the given image as base (e.g. lower sysext layer)",
                        type=Path,
-                       metavar='IMAGE')
+                       metavar="IMAGE")
     group.add_argument(
         "--root-size", help="Set size of root partition (only gpt_ext4, gpt_xfs, gpt_btrfs)", metavar="BYTES"
     )
@@ -5718,31 +5718,31 @@ def create_parser() -> ArgumentParserMkosi:
         "--tmp-size", help="Set size of /var/tmp partition (only gpt_ext4, gpt_xfs, gpt_squashfs)", metavar="BYTES"
     )
     group.add_argument(
-        '--usr-only',
-        metavar='BOOL',
+        "--usr-only",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Generate a /usr/ partition instead of a root partition',
+        help="Generate a /usr/ partition instead of a root partition",
     )
 
     group = parser.add_argument_group("Validation (only gpt_ext4, gpt_xfs, gpt_btrfs, gpt_squashfs, tar, cpio)")
     group.add_argument(
-        '--checksum',
-        metavar='BOOL',
+        "--checksum",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Write SHA256SUMS file',
+        help="Write SHA256SUMS file",
     )
     group.add_argument(
-        '--sign',
-        metavar='BOOL',
+        "--sign",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Write and sign SHA256SUMS file',
+        help="Write and sign SHA256SUMS file",
     )
     group.add_argument("--key", help="GPG key to use for signing")
     group.add_argument(
-        '--bmap',
-        metavar='BOOL',
+        "--bmap",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Write block map file (.bmap) for bmaptool usage (only gpt_ext4, gpt_btrfs)',
+        help="Write block map file (.bmap) for bmaptool usage (only gpt_ext4, gpt_btrfs)",
     )
 
     group = parser.add_argument_group("Host configuration")
@@ -5757,49 +5757,49 @@ def create_parser() -> ArgumentParserMkosi:
         "--extra-search-paths", dest="extra_search_paths", action=ColonDelimitedListAction, help=argparse.SUPPRESS
     )  # Compatibility option
     group.add_argument(
-        '--qemu-headless',
-        metavar='BOOL',
+        "--qemu-headless",
+        metavar="BOOL",
         action=BooleanAction,
         help="Configure image for qemu's -nographic mode",
     )
     group.add_argument("--qemu-smp", help="Configure guest's SMP settings", metavar="SMP", default="2")
     group.add_argument("--qemu-mem", help="Configure guest's RAM size", metavar="MEM", default="1G")
     group.add_argument(
-        '--qemu-kvm',
-        metavar='BOOL',
+        "--qemu-kvm",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Configure whether to use KVM or not',
+        help="Configure whether to use KVM or not",
         default=qemu_check_kvm_support(),
     )
     group.add_argument(
-        '--nspawn-keep-unit',
-        metavar='BOOL',
+        "--nspawn-keep-unit",
+        metavar="BOOL",
         action=BooleanAction,
-        help='If specified, underlying systemd-nspawn containers use the ressources of the current unit.',
+        help="If specified, underlying systemd-nspawn containers use the ressources of the current unit.",
     )
     group.add_argument(
-        '--network-veth',
-        dest='netdev',
-        metavar='BOOL',
+        "--network-veth",
+        dest="netdev",
+        metavar="BOOL",
         action=BooleanAction,
         help=argparse.SUPPRESS,
     ) # Compatibility option
     group.add_argument(
-        '--netdev',
-        metavar='BOOL',
+        "--netdev",
+        metavar="BOOL",
         action=BooleanAction,
-        help='Create a virtual Ethernet link between the host and the container/VM',
+        help="Create a virtual Ethernet link between the host and the container/VM",
     )
     group.add_argument(
-        '--ephemeral',
-        metavar='BOOL',
+        "--ephemeral",
+        metavar="BOOL",
         action=BooleanAction,
-        help=('If specified, the container/VM is run with a temporary snapshot of the output '
-              'image that is removed immediately when the container/VM terminates'),
+        help=("If specified, the container/VM is run with a temporary snapshot of the output "
+              "image that is removed immediately when the container/VM terminates"),
     )
     group.add_argument(
-        '--ssh',
-        metavar='BOOL',
+        "--ssh",
+        metavar="BOOL",
         action=BooleanAction,
         help="Set up SSH access from the host to the final image via 'mkosi ssh'",
     )
@@ -5856,11 +5856,11 @@ def create_parser() -> ArgumentParserMkosi:
         metavar="PATH",
     )
     group.add_argument(
-        '-B',
-        '--auto-bump',
+        "-B",
+        "--auto-bump",
         metavar='BOOL',
         action=BooleanAction,
-        help='Automatically bump image version after building',
+        help="Automatically bump image version after building",
     )
     group.add_argument(
         "--debug",
