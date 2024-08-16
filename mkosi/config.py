@@ -512,8 +512,6 @@ def parse_path(value: str,
     path = Path(value)
 
     if expanduser:
-        if path.is_relative_to("~") and not INVOKING_USER.is_running_user():
-            path = INVOKING_USER.home() / path.relative_to("~")
         path = path.expanduser()
 
     if required and not path.exists():
@@ -1545,7 +1543,6 @@ class Config:
     ephemeral: bool
     credentials: dict[str, str]
     kernel_command_line_extra: list[str]
-    acl: bool
     tools_tree: Optional[Path]
     tools_tree_distribution: Optional[Distribution]
     tools_tree_release: Optional[str]
@@ -1771,9 +1768,9 @@ class Config:
         tools: bool = True,
         scripts: Optional[Path] = None,
         mounts: Sequence[Mount] = (),
+        usroverlaydirs: Sequence[PathString] = (),
         options: Sequence[PathString] = (),
         setup: Sequence[PathString] = (),
-        extra: Sequence[PathString] = (),
     ) -> AbstractContextManager[list[PathString]]:
         mounts = [
             *([Mount(p, "/proxy.cacert", ro=True)] if (p := self.proxy_peer_certificate) else []),
@@ -1798,9 +1795,9 @@ class Config:
             scripts=scripts,
             tools=self.tools() if tools else Path("/"),
             mounts=mounts,
+            usroverlaydirs=usroverlaydirs,
             options=options,
             setup=setup,
-            extra=extra,
         )
 
 
@@ -2895,15 +2892,6 @@ SETTINGS = (
         section="Host",
         parse=config_make_list_parser(delimiter=" "),
         help="Append extra entries to the kernel command line when booting the image",
-    ),
-    ConfigSetting(
-        dest="acl",
-        metavar="BOOL",
-        nargs="?",
-        section="Host",
-        parse=config_parse_boolean,
-        help="Set ACLs on generated directories to permit the user running mkosi to remove them",
-        scope=SettingScope.universal,
     ),
     ConfigSetting(
         dest="tools_tree",
@@ -4259,7 +4247,6 @@ def summary(config: Config) -> str:
                           Ephemeral: {config.ephemeral}
                         Credentials: {line_join_list(config.credentials.keys())}
           Extra Kernel Command Line: {line_join_list(config.kernel_command_line_extra)}
-                           Use ACLs: {yes_no(config.acl)}
                          Tools Tree: {config.tools_tree}
             Tools Tree Distribution: {none_to_none(config.tools_tree_distribution)}
                  Tools Tree Release: {none_to_none(config.tools_tree_release)}

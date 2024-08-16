@@ -5,6 +5,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from mkosi.archive import extract_tar
+from mkosi.cage import umask
 from mkosi.config import Architecture, Config
 from mkosi.context import Context
 from mkosi.distributions import DistributionInstaller, PackageType
@@ -13,7 +14,7 @@ from mkosi.installer.apt import Apt, AptRepository
 from mkosi.log import die
 from mkosi.run import run
 from mkosi.sandbox import Mount
-from mkosi.util import listify, umask
+from mkosi.util import listify
 
 
 class Installer(DistributionInstaller):

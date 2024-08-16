@@ -9,6 +9,7 @@ import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
+from mkosi.cage import BTRFS_SUPER_MAGIC, statfs
 from mkosi.config import ConfigFeature
 from mkosi.log import ARG_DEBUG, die
 from mkosi.run import run
@@ -17,16 +18,8 @@ from mkosi.types import PathString
 from mkosi.versioncomp import GenericVersion
 
 
-def statfs(path: Path, *, sandbox: SandboxProtocol = nosandbox) -> str:
-    return run(
-        ["stat", "--file-system", "--format", "%T", path],
-        stdout=subprocess.PIPE,
-        sandbox=sandbox(binary="stat", mounts=[Mount(path, path, ro=True)]),
-    ).stdout.strip()
-
-
-def is_subvolume(path: Path, *, sandbox: SandboxProtocol = nosandbox) -> bool:
-    return path.is_dir() and path.stat().st_ino == 256 and statfs(path, sandbox=sandbox) == "btrfs"
+def is_subvolume(path: Path) -> bool:
+    return path.is_dir() and path.stat().st_ino == 256 and statfs(str(path)) == BTRFS_SUPER_MAGIC
 
 
 def cp_version(*, sandbox: SandboxProtocol = nosandbox) -> GenericVersion:
@@ -45,7 +38,7 @@ def make_tree(
     use_subvolumes: ConfigFeature = ConfigFeature.disabled,
     sandbox: SandboxProtocol = nosandbox,
 ) -> Path:
-    if statfs(path.parent, sandbox=sandbox) != "btrfs":
+    if statfs(str(path.parent)) != BTRFS_SUPER_MAGIC:
         if use_subvolumes == ConfigFeature.enabled:
             die(f"Subvolumes requested but {path} is not located on a btrfs filesystem")
 
@@ -113,7 +106,7 @@ def copy_tree(
     if (
         use_subvolumes == ConfigFeature.disabled or
         not preserve or
-        not is_subvolume(src, sandbox=sandbox) or
+        not is_subvolume(src) or
         (dst.exists() and any(dst.iterdir()))
     ):
         with (
@@ -149,7 +142,7 @@ def rmtree(*paths: Path, sandbox: SandboxProtocol = nosandbox) -> None:
     if not paths:
         return
 
-    if subvolumes := sorted({p for p in paths if p.exists() and is_subvolume(p, sandbox=sandbox)}):
+    if subvolumes := sorted({p for p in paths if p.exists() and is_subvolume(p)}):
         # Silence and ignore failures since when not running as root, this will fail with a permission error unless the
         # btrfs filesystem is mounted with user_subvol_rm_allowed.
         run(["btrfs", "subvolume", "delete", *subvolumes],

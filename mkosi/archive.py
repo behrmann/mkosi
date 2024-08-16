@@ -5,11 +5,12 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Optional
 
+from mkosi.cage import umask
 from mkosi.log import log_step
 from mkosi.run import run
 from mkosi.sandbox import Mount, SandboxProtocol, finalize_passwd_mounts, nosandbox
 from mkosi.types import PathString
-from mkosi.util import chdir, umask
+from mkosi.util import chdir
 
 
 def tar_exclude_apivfs_tmp() -> list[str]:
@@ -42,6 +43,8 @@ def make_tar(src: Path, dst: Path, *, sandbox: SandboxProtocol = nosandbox) -> N
                 "--pax-option=delete=atime,delete=ctime,delete=mtime",
                 "--sparse",
                 "--force-local",
+                *(["--owner=root:0"] if os.getuid() != 0 else []),
+                *(["--group=root:0"] if os.getuid() != 0 else []),
                 *tar_exclude_apivfs_tmp(),
                 ".",
             ],
@@ -78,7 +81,7 @@ def extract_tar(
             "--keep-directory-symlink",
             "--no-overwrite-dir",
             "--same-permissions",
-            "--same-owner" if (dst / "etc/passwd").exists() else "--numeric-owner",
+            "--same-owner" if (dst / "etc/passwd").exists() and os.getuid() == 0 else "--numeric-owner",
             "--same-order",
             "--acls",
             "--selinux",
@@ -120,6 +123,7 @@ def make_cpio(
                 "--format=newc",
                 "--quiet",
                 "--directory", src,
+                *(["--owner=0:0"] if os.getuid() != 0 else []),
             ],
             input="\0".join(os.fspath(f) for f in files),
             stdout=f,

@@ -9,11 +9,9 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Optional
 
+from mkosi.cage import mount, umount2
 from mkosi.config import Config
-from mkosi.run import run
 from mkosi.sandbox import Mount
-from mkosi.types import PathString
-from mkosi.util import umask
 from mkosi.versioncomp import GenericVersion
 
 
@@ -34,57 +32,16 @@ def delete_whiteout_files(path: Path) -> None:
 
 
 @contextlib.contextmanager
-def mount(
-    what: PathString,
-    where: Path,
-    operation: Optional[str] = None,
-    options: Sequence[str] = (),
-    type: Optional[str] = None,
-    read_only: bool = False,
-    lazy: bool = False,
-    umount: bool = True,
-) -> Iterator[Path]:
-    if not where.exists():
-        with umask(~0o755):
-            where.mkdir(parents=True)
-
-    if read_only:
-        options = ["ro", *options]
-
-    cmd: list[PathString] = ["mount", "--no-mtab"]
-
-    if operation:
-        cmd += [operation]
-
-    cmd += [what, where]
-
-    if type:
-        cmd += ["--types", type]
-
-    if options:
-        cmd += ["--options", ",".join(options)]
-
-    try:
-        run(cmd)
-        yield where
-    finally:
-        if umount:
-            run(["umount", "--no-mtab", *(["--lazy"] if lazy else []), where])
-
-
-@contextlib.contextmanager
 def mount_overlay(
     lowerdirs: Sequence[Path],
     upperdir: Optional[Path] = None,
     where: Optional[Path] = None,
-    lazy: bool = False,
 ) -> Iterator[Path]:
     with contextlib.ExitStack() as stack:
         if upperdir is None:
             upperdir = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="volatile-overlay")))
             st = lowerdirs[-1].stat()
             os.chmod(upperdir, st.st_mode)
-            os.chown(upperdir, st.st_uid, st.st_gid)
 
         workdir = Path(
             stack.enter_context(tempfile.TemporaryDirectory(dir=upperdir.parent, prefix=f"{upperdir.name}-workdir"))
@@ -109,17 +66,18 @@ def mount_overlay(
             # See https://www.kernel.org/doc/html/latest/filesystems/overlayfs.html#sharing-and-copying-layers
             # and https://github.com/systemd/mkosi/issues/1841.
             "index=off",
-            "metacopy=off"
+            "metacopy=off",
         ]
 
         # userxattr is only supported on overlayfs since kernel 5.11
         if GenericVersion(platform.release()) >= GenericVersion("5.11"):
             options.append("userxattr")
 
+        mount("overlay", str(where), type="overlay", flags=0, options=",".join(options))
         try:
-            with mount("overlay", where, options=options, type="overlay", lazy=lazy):
-                yield where
+            yield where
         finally:
+            umount2(str(where))
             delete_whiteout_files(upperdir)
 
 

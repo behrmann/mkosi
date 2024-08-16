@@ -27,6 +27,21 @@ from typing import Optional, Union, cast
 
 from mkosi.archive import can_extract_tar, extract_tar, make_cpio, make_tar
 from mkosi.burn import run_burn
+from mkosi.cage import (
+    CLONE_NEWNS,
+    MOUNT_ATTR_NODEV,
+    MOUNT_ATTR_NOEXEC,
+    MOUNT_ATTR_NOSUID,
+    MOUNT_ATTR_RDONLY,
+    MS_REC,
+    MS_SLAVE,
+    acquire_privileges,
+    mount,
+    mount_rbind,
+    umask,
+    unshare,
+    userns_has_single_user,
+)
 from mkosi.completion import print_completion
 from mkosi.config import (
     PACKAGE_GLOBS,
@@ -70,10 +85,10 @@ from mkosi.run import (
     fork_and_wait,
     run,
 )
-from mkosi.sandbox import Mount, chroot_cmd, finalize_passwd_mounts
+from mkosi.sandbox import Mount, chroot_cmd, chroot_script_cmd, finalize_passwd_mounts
 from mkosi.tree import copy_tree, move_tree, rmtree
 from mkosi.types import PathString
-from mkosi.user import CLONE_NEWNS, INVOKING_USER, become_root, unshare
+from mkosi.user import INVOKING_USER
 from mkosi.util import (
     flatten,
     flock,
@@ -85,7 +100,6 @@ from mkosi.util import (
     read_env_file,
     round_up,
     scopedenv,
-    umask,
 )
 from mkosi.versioncomp import GenericVersion
 from mkosi.vmspawn import run_vmspawn
@@ -131,7 +145,7 @@ def remove_files(context: Context) -> None:
 
     with complete_step("Removing files…"):
         remove = flatten(context.root.glob(pattern.lstrip("/")) for pattern in context.config.remove_files)
-        rmtree(*remove, sandbox=context.sandbox)
+        rmtree(*remove, context.root / "work", sandbox=context.sandbox)
 
 
 def install_distribution(context: Context) -> None:
@@ -364,9 +378,6 @@ def mount_build_overlay(context: Context, volatile: bool = False) -> Iterator[Pa
 @contextlib.contextmanager
 def finalize_scripts(config: Config, scripts: Mapping[str, Sequence[PathString]]) -> Iterator[Path]:
     with tempfile.TemporaryDirectory(prefix="mkosi-scripts-") as d:
-        # Make sure than when mkosi-as-caller is used the scripts can still be accessed.
-        os.chmod(d, 0o755)
-
         for name, script in scripts.items():
             # Make sure we don't end up in a recursive loop when we name a script after the binary it execs
             # by removing the scripts directory from the PATH when we execute a script.
@@ -387,7 +398,6 @@ def finalize_scripts(config: Config, scripts: Mapping[str, Sequence[PathString]]
                 f.write(f'exec {shlex.join(str(s) for s in script)} "$@"\n')
 
             make_executable(Path(d) / name)
-            os.chmod(Path(d) / name, 0o755)
             os.utime(Path(d) / name, (0, 0))
 
         yield Path(d)
@@ -401,12 +411,8 @@ GIT_ENV = {
 
 
 def mkosi_as_caller() -> tuple[str, ...]:
-    return (
-        "setpriv",
-        f"--reuid={INVOKING_USER.uid}",
-        f"--regid={INVOKING_USER.gid}",
-        "--clear-groups",
-    )
+    # Kept for backwards compatibility.
+    return ("env",)
 
 
 def finalize_host_scripts(
@@ -447,8 +453,8 @@ def run_configure_scripts(config: Config) -> Config:
         QEMU_ARCHITECTURE=config.architecture.to_qemu(),
         DISTRIBUTION_ARCHITECTURE=config.distribution.architecture(config.architecture),
         SRCDIR="/work/src",
-        MKOSI_UID=str(INVOKING_USER.uid),
-        MKOSI_GID=str(INVOKING_USER.gid),
+        MKOSI_UID=str(os.getuid()),
+        MKOSI_GID=str(os.getgid()),
     )
 
     if config.profile:
@@ -485,8 +491,8 @@ def run_sync_scripts(context: Context) -> None:
         ARCHITECTURE=str(context.config.architecture),
         DISTRIBUTION_ARCHITECTURE=context.config.distribution.architecture(context.config.architecture),
         SRCDIR="/work/src",
-        MKOSI_UID=str(INVOKING_USER.uid),
-        MKOSI_GID=str(INVOKING_USER.gid),
+        MKOSI_UID=str(os.getuid()),
+        MKOSI_GID=str(os.getgid()),
         MKOSI_CONFIG="/work/config.json",
         CACHED=one_zero(have_cache(context.config)),
     )
@@ -516,7 +522,7 @@ def run_sync_scripts(context: Context) -> None:
                 # are in use as well.
                 mounts += [Mount(p, p)]
                 env["HOME"] = os.fspath(p)
-            if (p := Path(f"/run/user/{INVOKING_USER.uid}")).exists():
+            if (p := Path(f"/run/user/{os.getuid()}")).exists():
                 mounts += [Mount(p, p, ro=True)]
 
             with complete_step(f"Running sync script {script}…"):
@@ -552,8 +558,8 @@ def run_prepare_scripts(context: Context, build: bool) -> None:
         ARTIFACTDIR="/work/artifacts",
         SCRIPT="/work/prepare",
         CHROOT_SCRIPT="/work/prepare",
-        MKOSI_UID=str(INVOKING_USER.uid),
-        MKOSI_GID=str(INVOKING_USER.gid),
+        MKOSI_UID=str(os.getuid()),
+        MKOSI_GID=str(os.getgid()),
         MKOSI_CONFIG="/work/config.json",
         WITH_DOCS=one_zero(context.config.with_docs),
         WITH_NETWORK=one_zero(context.config.with_network),
@@ -579,10 +585,8 @@ def run_prepare_scripts(context: Context, build: bool) -> None:
             arg = "final"
 
         for script in context.config.prepare_scripts:
-            chroot = chroot_cmd(resolve=True, work=True)
-
             helpers = {
-                "mkosi-chroot": chroot,
+                "mkosi-chroot": chroot_script_cmd(tools=bool(context.config.tools_tree), network=True, work=True),
                 "mkosi-as-caller": mkosi_as_caller(),
                 **context.config.distribution.package_manager(context.config).scripts(context),
             }
@@ -592,6 +596,20 @@ def run_prepare_scripts(context: Context, build: bool) -> None:
                 finalize_config_json(context.config) as json,
                 complete_step(step_msg.format(script)),
             ):
+                mounts = [
+                    *sources,
+                    Mount(script, "/work/prepare", ro=True),
+                    Mount(json, "/work/config.json", ro=True),
+                    Mount(context.artifacts, "/work/artifacts"),
+                    Mount(context.package_dir, "/work/packages"),
+                    *(
+                        [Mount(context.config.build_dir, "/work/build", ro=True)]
+                        if context.config.build_dir
+                        else []
+                    ),
+                ]
+                options=["--dir", "/work/src", "--chdir", "/work/src"]
+
                 run(
                     ["/work/prepare", arg],
                     env=env | context.config.environment,
@@ -601,22 +619,17 @@ def run_prepare_scripts(context: Context, build: bool) -> None:
                         network=True,
                         vartmp=True,
                         mounts=[
-                            *sources,
-                            Mount(script, "/work/prepare", ro=True),
-                            Mount(json, "/work/config.json", ro=True),
+                            *mounts,
                             Mount(context.root, "/buildroot"),
-                            Mount(context.artifacts, "/work/artifacts"),
-                            Mount(context.package_dir, "/work/packages"),
-                            *(
-                                [Mount(context.config.build_dir, "/work/build", ro=True)]
-                                if context.config.build_dir
-                                else []
-                            ),
                             *context.config.distribution.package_manager(context.config).mounts(context),
                         ],
-                        options=["--dir", "/work/src", "--chdir", "/work/src"],
+                        options=options,
                         scripts=hd,
-                        extra=chroot if script.suffix == ".chroot" else [],
+                    ) if script.suffix != ".chroot" else chroot_cmd(
+                        root=context.root,
+                        network=True,
+                        mounts=mounts,
+                        options=["--dir", "/work/src", "--chdir", "/work/src"],
                     )
                 )
 
@@ -641,8 +654,8 @@ def run_build_scripts(context: Context) -> None:
         ARTIFACTDIR="/work/artifacts",
         SCRIPT="/work/build-script",
         CHROOT_SCRIPT="/work/build-script",
-        MKOSI_UID=str(INVOKING_USER.uid),
-        MKOSI_GID=str(INVOKING_USER.gid),
+        MKOSI_UID=str(os.getuid()),
+        MKOSI_GID=str(os.getgid()),
         MKOSI_CONFIG="/work/config.json",
         WITH_DOCS=one_zero(context.config.with_docs),
         WITH_NETWORK=one_zero(context.config.with_network),
@@ -664,10 +677,12 @@ def run_build_scripts(context: Context) -> None:
         finalize_source_mounts(context.config, ephemeral=context.config.build_sources_ephemeral) as sources,
     ):
         for script in context.config.build_scripts:
-            chroot = chroot_cmd(resolve=context.config.with_network, work=True)
-
             helpers = {
-                "mkosi-chroot": chroot,
+                "mkosi-chroot": chroot_script_cmd(
+                    tools=bool(context.config.tools_tree),
+                    network=context.config.with_network,
+                    work=True
+                ),
                 "mkosi-as-caller": mkosi_as_caller(),
                 **context.config.distribution.package_manager(context.config).scripts(context),
             }
@@ -679,6 +694,22 @@ def run_build_scripts(context: Context) -> None:
                 finalize_config_json(context.config) as json,
                 complete_step(f"Running build script {script}…"),
             ):
+                mounts = [
+                    *sources,
+                    Mount(script, "/work/build-script", ro=True),
+                    Mount(json, "/work/config.json", ro=True),
+                    Mount(context.install_dir, "/work/dest"),
+                    Mount(context.staging, "/work/out"),
+                    Mount(context.artifacts, "/work/artifacts"),
+                    Mount(context.package_dir, "/work/packages"),
+                    *(
+                        [Mount(context.config.build_dir, "/work/build")]
+                        if context.config.build_dir
+                        else []
+                    ),
+                ]
+                options = ["--dir", "/work/src", "--chdir", "/work/src"]
+
                 run(
                     ["/work/build-script", *cmdline],
                     env=env | context.config.environment,
@@ -688,25 +719,18 @@ def run_build_scripts(context: Context) -> None:
                         network=context.config.with_network,
                         vartmp=True,
                         mounts=[
-                            *sources,
-                            Mount(script, "/work/build-script", ro=True),
-                            Mount(json, "/work/config.json", ro=True),
                             Mount(context.root, "/buildroot"),
-                            Mount(context.install_dir, "/work/dest"),
-                            Mount(context.staging, "/work/out"),
-                            Mount(context.artifacts, "/work/artifacts"),
-                            Mount(context.package_dir, "/work/packages"),
-                            *(
-                                [Mount(context.config.build_dir, "/work/build")]
-                                if context.config.build_dir
-                                else []
-                            ),
                             *context.config.distribution.package_manager(context.config).mounts(context),
+                            *mounts,
                         ],
-                        options=["--dir", "/work/src", "--chdir", "/work/src"],
+                        options=options,
                         scripts=hd,
-                        extra=chroot if script.suffix == ".chroot" else [],
-                    ),
+                    ) if script.suffix != ".chroot" else chroot_cmd(
+                        root=context.root,
+                        network=context.config.with_network,
+                        mounts=mounts,
+                        options=options,
+                    )
                 )
 
 
@@ -728,8 +752,8 @@ def run_postinst_scripts(context: Context) -> None:
         CHROOT_SRCDIR="/work/src",
         PACKAGEDIR="/work/packages",
         ARTIFACTDIR="/work/artifacts",
-        MKOSI_UID=str(INVOKING_USER.uid),
-        MKOSI_GID=str(INVOKING_USER.gid),
+        MKOSI_UID=str(os.getuid()),
+        MKOSI_GID=str(os.getgid()),
         MKOSI_CONFIG="/work/config.json",
         WITH_NETWORK=one_zero(context.config.with_network),
         **GIT_ENV,
@@ -741,14 +765,14 @@ def run_postinst_scripts(context: Context) -> None:
     if context.config.build_dir is not None:
         env |= dict(BUILDDIR="/work/build")
 
-    with (
-        finalize_source_mounts(context.config, ephemeral=context.config.build_sources_ephemeral) as sources,
-    ):
+    with finalize_source_mounts(context.config, ephemeral=context.config.build_sources_ephemeral) as sources:
         for script in context.config.postinst_scripts:
-            chroot = chroot_cmd(resolve=context.config.with_network, work=True)
-
             helpers = {
-                "mkosi-chroot": chroot,
+                "mkosi-chroot": chroot_script_cmd(
+                    tools=bool(context.config.tools_tree),
+                    network=context.config.with_network,
+                    work=True,
+                ),
                 "mkosi-as-caller": mkosi_as_caller(),
                 **context.config.distribution.package_manager(context.config).scripts(context),
             }
@@ -758,6 +782,21 @@ def run_postinst_scripts(context: Context) -> None:
                 finalize_config_json(context.config) as json,
                 complete_step(f"Running postinstall script {script}…"),
             ):
+                mounts = [
+                    *sources,
+                    Mount(script, "/work/postinst", ro=True),
+                    Mount(json, "/work/config.json", ro=True),
+                    Mount(context.staging, "/work/out"),
+                    Mount(context.artifacts, "/work/artifacts"),
+                    Mount(context.package_dir, "/work/packages"),
+                    *(
+                        [Mount(context.config.build_dir, "/work/build", ro=True)]
+                        if context.config.build_dir
+                        else []
+                    ),
+                ]
+                options = ["--dir", "/work/src", "--chdir", "/work/src"]
+
                 run(
                     ["/work/postinst", "final"],
                     env=env | context.config.environment,
@@ -767,24 +806,18 @@ def run_postinst_scripts(context: Context) -> None:
                         network=context.config.with_network,
                         vartmp=True,
                         mounts=[
-                            *sources,
-                            Mount(script, "/work/postinst", ro=True),
-                            Mount(json, "/work/config.json", ro=True),
                             Mount(context.root, "/buildroot"),
-                            Mount(context.staging, "/work/out"),
-                            Mount(context.artifacts, "/work/artifacts"),
-                            Mount(context.package_dir, "/work/packages"),
-                            *(
-                                [Mount(context.config.build_dir, "/work/build", ro=True)]
-                                if context.config.build_dir
-                                else []
-                            ),
                             *context.config.distribution.package_manager(context.config).mounts(context),
+                            *mounts,
                         ],
-                        options=["--dir", "/work/src", "--chdir", "/work/src"],
+                        options=options,
                         scripts=hd,
-                        extra=chroot if script.suffix == ".chroot" else [],
-                    ),
+                    ) if script.suffix != ".chroot" else chroot_cmd(
+                        root=context.root,
+                        network=context.config.with_network,
+                        mounts=mounts,
+                        options=options,
+                    )
                 )
 
 
@@ -806,8 +839,8 @@ def run_finalize_scripts(context: Context) -> None:
         ARTIFACTDIR="/work/artifacts",
         SCRIPT="/work/finalize",
         CHROOT_SCRIPT="/work/finalize",
-        MKOSI_UID=str(INVOKING_USER.uid),
-        MKOSI_GID=str(INVOKING_USER.gid),
+        MKOSI_UID=str(os.getuid()),
+        MKOSI_GID=str(os.getgid()),
         MKOSI_CONFIG="/work/config.json",
         WITH_NETWORK=one_zero(context.config.with_network),
         **GIT_ENV,
@@ -821,10 +854,12 @@ def run_finalize_scripts(context: Context) -> None:
 
     with finalize_source_mounts(context.config, ephemeral=context.config.build_sources_ephemeral) as sources:
         for script in context.config.finalize_scripts:
-            chroot = chroot_cmd(resolve=context.config.with_network, work=True)
-
             helpers = {
-                "mkosi-chroot": chroot,
+                "mkosi-chroot": chroot_script_cmd(
+                    tools=bool(context.config.tools_tree),
+                    network=context.config.with_network,
+                    work=True,
+                ),
                 "mkosi-as-caller": mkosi_as_caller(),
                 **context.config.distribution.package_manager(context.config).scripts(context),
             }
@@ -834,6 +869,21 @@ def run_finalize_scripts(context: Context) -> None:
                 finalize_config_json(context.config) as json,
                 complete_step(f"Running finalize script {script}…"),
             ):
+                mounts = [
+                    *sources,
+                    Mount(script, "/work/finalize", ro=True),
+                    Mount(json, "/work/config.json", ro=True),
+                    Mount(context.staging, "/work/out"),
+                    Mount(context.artifacts, "/work/artifacts"),
+                    Mount(context.package_dir, "/work/packages"),
+                    *(
+                        [Mount(context.config.build_dir, "/work/build", ro=True)]
+                        if context.config.build_dir
+                        else []
+                    ),
+                ]
+                options = ["--dir", "/work/src", "--chdir", "/work/src"]
+
                 run(
                     ["/work/finalize"],
                     env=env | context.config.environment,
@@ -843,24 +893,18 @@ def run_finalize_scripts(context: Context) -> None:
                         network=context.config.with_network,
                         vartmp=True,
                         mounts=[
-                            *sources,
-                            Mount(script, "/work/finalize", ro=True),
-                            Mount(json, "/work/config.json", ro=True),
+                            *mounts,
                             Mount(context.root, "/buildroot"),
-                            Mount(context.staging, "/work/out"),
-                            Mount(context.artifacts, "/work/artifacts"),
-                            Mount(context.package_dir, "/work/packages"),
-                            *(
-                                [Mount(context.config.build_dir, "/work/build", ro=True)]
-                                if context.config.build_dir
-                                else []
-                            ),
                             *context.config.distribution.package_manager(context.config).mounts(context),
                         ],
-                        options=["--dir", "/work/src", "--chdir", "/work/src"],
+                        options=options,
                         scripts=hd,
-                        extra=chroot if script.suffix == ".chroot" else [],
-                    ),
+                    ) if script.suffix != ".chroot" else chroot_cmd(
+                        root=context.root,
+                        network=context.config.with_network,
+                        mounts=mounts,
+                        options=options,
+                    )
                 )
 
 
@@ -875,8 +919,8 @@ def run_postoutput_scripts(context: Context) -> None:
         DISTRIBUTION_ARCHITECTURE=context.config.distribution.architecture(context.config.architecture),
         SRCDIR="/work/src",
         OUTPUTDIR="/work/out",
-        MKOSI_UID=str(INVOKING_USER.uid),
-        MKOSI_GID=str(INVOKING_USER.gid),
+        MKOSI_UID=str(os.getuid()),
+        MKOSI_GID=str(os.getgid()),
         MKOSI_CONFIG="/work/config.json",
     )
 
@@ -901,7 +945,9 @@ def run_postoutput_scripts(context: Context) -> None:
                             Mount(json, "/work/config.json", ro=True),
                             Mount(context.staging, "/work/out"),
                         ],
-                        options=["--dir", "/work/src", "--chdir", "/work/src", "--dir", "/work/out"]
+                        # postoutput scripts should run as (fake) root so that file ownership is always recorded as if
+                        # owned by root.
+                        options=["--dir", "/work/src", "--chdir", "/work/src", "--dir", "/work/out", "--become-root"]
                     ),
                     stdin=sys.stdin,
                 )
@@ -1563,8 +1609,6 @@ def grub_bios_setup(context: Context, partitions: Sequence[Partition]) -> None:
         mountinfo.write(f"1 0 1:1 / / - fat {context.staging / context.config.output_with_format}\n")
         mountinfo.flush()
 
-        # We don't setup the mountinfo bind mount with bwrap because we need to know the child process pid to
-        # be able to do the mount and we don't know the pid beforehand.
         run(
             [
                 setup,
@@ -1576,9 +1620,8 @@ def grub_bios_setup(context: Context, partitions: Sequence[Partition]) -> None:
                 mounts=[
                     Mount(directory, "/grub"),
                     Mount(context.staging, context.staging),
-                    Mount(mountinfo.name, mountinfo.name),
+                    Mount(mountinfo.name, "/proc/self/mountinfo"),
                 ],
-                extra=["sh", "-c", f"mount --bind {mountinfo.name} /proc/$$/mountinfo && exec $0 \"$@\""],
             ),
         )
 
@@ -1658,19 +1701,10 @@ def install_package_manager_trees(context: Context) -> None:
 
     (context.pkgmngr / "var/log").mkdir(parents=True)
 
-    with (context.pkgmngr / "etc/passwd").open("w") as passwd:
-        passwd.write("root:x:0:0:root:/root:/bin/sh\n")
-        if INVOKING_USER.uid != 0:
-            name = INVOKING_USER.name()
-            home = INVOKING_USER.home()
-            passwd.write(f"{name}:x:{INVOKING_USER.uid}:{INVOKING_USER.gid}:{name}:{home}:/bin/sh\n")
-        os.fchown(passwd.fileno(), INVOKING_USER.uid, INVOKING_USER.gid)
-
-    with (context.pkgmngr / "etc/group").open("w") as group:
-        group.write("root:x:0:\n")
-        if INVOKING_USER.uid != 0:
-            group.write(f"{INVOKING_USER.name()}:x:{INVOKING_USER.gid}:\n")
-        os.fchown(group.fileno(), INVOKING_USER.uid, INVOKING_USER.gid)
+    if Path("/etc/passwd").exists():
+        shutil.copy("/etc/passwd", context.pkgmngr / "etc/passwd")
+    if Path("/etc/group").exists():
+        shutil.copy("/etc/passwd", context.pkgmngr / "etc/group")
 
     if (p := context.config.tools() / "etc/crypto-policies").exists():
         copy_tree(
@@ -1822,7 +1856,6 @@ def finalize_default_initrd(
         *(["--package-cache-dir", str(config.package_cache_dir)] if config.package_cache_dir else []),
         *(["--local-mirror", str(config.local_mirror)] if config.local_mirror else []),
         "--incremental", str(config.incremental),
-        "--acl", str(config.acl),
         *(f"--package={package}" for package in config.initrd_packages),
         *(f"--volatile-package={package}" for package in config.initrd_volatile_packages),
         *(f"--package-directory={d}" for d in config.package_directories),
@@ -2015,7 +2048,6 @@ def build_kernel_modules_initrd(context: Context, kver: str) -> Path:
                 host=context.config.kernel_modules_initrd_include_host,
             ),
             exclude=context.config.kernel_modules_initrd_exclude,
-            sandbox=context.sandbox,
         ),
         sandbox=context.sandbox,
     )
@@ -2066,7 +2098,7 @@ def python_binary(config: Config, *, binary: Optional[PathString]) -> str:
 
     # If there's no tools tree, prefer the interpreter from MKOSI_INTERPRETER. If there is a tools
     # tree, just use the default python3 interpreter.
-    return "python3" if tools and config.tools_tree else os.getenv("MKOSI_INTERPRETER", "python3")
+    return "python3" if tools and config.tools_tree else sys.executable
 
 
 def extract_pe_section(context: Context, binary: Path, section: str, output: Path) -> Path:
@@ -2754,12 +2786,10 @@ def calculate_signature(context: Context) -> None:
     if sys.stderr.isatty():
         env |= dict(GPGTTY=os.ttyname(sys.stderr.fileno()))
 
-    options: list[PathString] = ["--perms", "755", "--dir", home]
     mounts = [Mount(home, home)]
 
     # gpg can communicate with smartcard readers via this socket so bind mount it in if it exists.
     if (p := Path("/run/pcscd/pcscd.comm")).exists():
-        options += ["--perms", "755", "--dir", p.parent]
         mounts += [Mount(p, p)]
 
     with (
@@ -2772,12 +2802,9 @@ def calculate_signature(context: Context) -> None:
             env=env,
             stdin=i,
             stdout=o,
-            # GPG messes with the user's home directory so we run it as the invoking user.
             sandbox=context.sandbox(
                 binary="gpg",
                 mounts=mounts,
-                options=options,
-                extra=["setpriv", f"--reuid={INVOKING_USER.uid}", f"--regid={INVOKING_USER.gid}", "--clear-groups"],
             )
         )
 
@@ -2936,8 +2963,6 @@ def check_ukify(
 
 
 def check_tools(config: Config, verb: Verb) -> None:
-    check_tool(config, "bwrap", reason="execute sandboxed commands")
-
     if verb == Verb.build:
         if config.bootable != ConfigFeature.disabled:
             check_tool(config, "depmod", reason="generate kernel module dependencies")
@@ -3104,18 +3129,10 @@ def run_depmod(context: Context, *, cache: bool = False) -> None:
                     host=context.config.kernel_modules_include_host,
                 ),
                 exclude=context.config.kernel_modules_exclude,
-                sandbox=context.sandbox,
             )
 
         with complete_step(f"Running depmod for {kver}"):
-            run(
-                ["depmod", "--all", kver],
-                sandbox=context.sandbox(
-                    binary=None,
-                    mounts=[Mount(context.root, "/buildroot")],
-                    extra=chroot_cmd(),
-                )
-            )
+            run(["depmod", "--all", kver], sandbox=chroot_cmd(root=context.root))
 
 
 def run_sysusers(context: Context) -> None:
@@ -3149,6 +3166,8 @@ def run_tmpfiles(context: Context) -> None:
                 "--remove",
                 # Exclude APIVFS and temporary files directories.
                 *(f"--exclude-prefix={d}" for d in ("/tmp", "/var/tmp", "/run", "/proc", "/sys", "/dev")),
+                # Exclude /var if we're not invoked as root as all the chown()'s for daemon owned directories will fail
+                *(["--exclude-prefix=/var"] if os.getuid() != 0 or userns_has_single_user() else []),
             ],
             env={"SYSTEMD_TMPFILES_FORCE_SUBVOL": "0"},
             # systemd-tmpfiles can exit with DATAERR or CANTCREAT in some cases which are handled as success by the
@@ -3162,6 +3181,9 @@ def run_tmpfiles(context: Context) -> None:
                     # mount the image's passwd over it to make ACL parsing work.
                     *finalize_passwd_mounts(context.root)
                 ],
+                # Sometimes directories are configured to be owned by root in tmpfiles snippets so we want to make sure
+                # those chown()'s succeed by making ourselves the root user so that the root user exists.
+                options=["--become-root"],
             ),
         )
 
@@ -3453,6 +3475,9 @@ def make_image(
                     ),
                     vartmp=True,
                     mounts=mounts,
+                    # Make sure we're root so that the mkfs tools invoked by systemd-repart think the files that go
+                    # into the disk image are owned by root.
+                    options=["--become-root"],
                 ),
             ).stdout
         )
@@ -3733,6 +3758,9 @@ def make_extension_image(context: Context, output: Path) -> None:
                     ),
                     vartmp=True,
                     mounts=mounts,
+                    # Make sure we're root so that the mkfs tools invoked by systemd-repart think the files that go
+                    # into the disk image are owned by root.
+                    options=["--become-root"],
                 ),
             ).stdout
         )
@@ -3749,13 +3777,8 @@ def finalize_staging(context: Context) -> None:
     rmtree(*(context.config.output_dir_or_cwd() / f.name for f in context.staging.iterdir()))
 
     for f in context.staging.iterdir():
-        # Make sure all build outputs that are not directories are owned by the user running mkosi.
-        if not f.is_dir():
-            os.chown(f, INVOKING_USER.uid, INVOKING_USER.gid, follow_symlinks=False)
-
         if f.is_symlink():
             (context.config.output_dir_or_cwd() / f.name).symlink_to(f.readlink())
-            os.chown(f, INVOKING_USER.uid, INVOKING_USER.gid, follow_symlinks=False)
             continue
 
         move_tree(
@@ -3803,7 +3826,6 @@ def setup_workspace(args: Args, config: Config) -> Iterator[Path]:
                 if args.debug_workspace:
                     stack.pop_all()
                     log_notice(f"Workspace: {workspace}")
-                    workspace.chmod(0o755)
 
                 raise
 
@@ -3867,9 +3889,8 @@ def copy_repository_metadata(context: Context) -> None:
                     binary: Optional[PathString],
                     vartmp: bool = False,
                     mounts: Sequence[Mount] = (),
-                    extra: Sequence[PathString] = (),
                 ) -> AbstractContextManager[list[PathString]]:
-                    return context.sandbox(binary=binary, vartmp=vartmp, mounts=[*mounts, *exclude], extra=extra)
+                    return context.sandbox(binary=binary, vartmp=vartmp, mounts=[*mounts, *exclude])
 
                 copy_tree(
                     src, dst,
@@ -4039,84 +4060,6 @@ def build_image(context: Context) -> None:
     print_output_size(context.config.output_dir_or_cwd() / context.config.output_with_compression)
 
 
-def setfacl(config: Config, root: Path, uid: int, allow: bool) -> None:
-    run(
-        [
-            "setfacl",
-            "--physical",
-            "--modify" if allow else "--remove",
-            f"user:{uid}:rwx" if allow else f"user:{uid}",
-            "-",
-        ],
-        # Supply files via stdin so we don't clutter --debug run output too much
-        input="\n".join([str(root), *(os.fspath(p) for p in root.rglob("*") if p.is_dir())]),
-        sandbox=config.sandbox(binary="setfacl", mounts=[Mount(root, root)]),
-    )
-
-
-@contextlib.contextmanager
-def acl_maybe_toggle(config: Config, root: Path, uid: int, *, always: bool) -> Iterator[None]:
-    if not config.acl:
-        yield
-        return
-
-    # getfacl complains about absolute paths so make sure we pass a relative one.
-    if root.exists():
-        sandbox = config.sandbox(binary="getfacl", mounts=[Mount(root, root)], options=["--chdir", root])
-        has_acl = f"user:{uid}:rwx" in run(["getfacl", "-n", "."], sandbox=sandbox, stdout=subprocess.PIPE).stdout
-
-        if not has_acl and not always:
-            yield
-            return
-    else:
-        has_acl = False
-
-    try:
-        if has_acl:
-            with complete_step(f"Removing ACLs from {root}"):
-                setfacl(config, root, uid, allow=False)
-
-        yield
-    finally:
-        if has_acl or always:
-            with complete_step(f"Adding ACLs to {root}"):
-                setfacl(config, root, uid, allow=True)
-
-
-@contextlib.contextmanager
-def acl_toggle_build(config: Config, uid: int) -> Iterator[None]:
-    if not config.acl:
-        yield
-        return
-
-    extras = [t.source for t in config.extra_trees]
-    skeletons = [t.source for t in config.skeleton_trees]
-
-    with contextlib.ExitStack() as stack:
-        for p in (*config.base_trees, *extras, *skeletons):
-            if p and p.is_dir():
-                stack.enter_context(acl_maybe_toggle(config, p, uid, always=False))
-
-        for p in (config.cache_dir, config.build_dir):
-            if p:
-                stack.enter_context(acl_maybe_toggle(config, p, uid, always=True))
-
-        if config.output_format == OutputFormat.directory:
-            stack.enter_context(acl_maybe_toggle(config, config.output_dir_or_cwd() / config.output, uid, always=True))
-
-        yield
-
-
-@contextlib.contextmanager
-def acl_toggle_boot(config: Config, uid: int) -> Iterator[None]:
-    if not config.acl or config.output_format != OutputFormat.directory:
-        yield
-        return
-
-    with acl_maybe_toggle(config, config.output_dir_or_cwd() / config.output, uid, always=False):
-        yield
-
-
 def run_shell(args: Args, config: Config) -> None:
     opname = "acquire shell in" if args.verb == Verb.shell else "boot"
     if config.output_format in (OutputFormat.tar, OutputFormat.cpio):
@@ -4162,7 +4105,13 @@ def run_shell(args: Args, config: Config) -> None:
                 stack.callback(lambda: (config.output_dir_or_cwd() / f"{name}.nspawn").unlink(missing_ok=True))
             shutil.copy2(config.nspawn_settings, config.output_dir_or_cwd() / f"{name}.nspawn")
 
-        if config.ephemeral:
+        # If we're booting a directory image that wasn't built by root, we always make an ephemeral copy to avoid
+        # ending up with files not owned by the directory image owner in the directory image.
+        if config.ephemeral or (
+            config.output_format == OutputFormat.directory and
+            args.verb == Verb.boot and
+            (config.output_dir_or_cwd() / config.output).stat().st_uid != 0
+        ):
             fname = stack.enter_context(copy_ephemeral(config, config.output_dir_or_cwd() / config.output))
         else:
             fname = stack.enter_context(flock_or_die(config.output_dir_or_cwd() / config.output))
@@ -4195,14 +4144,21 @@ def run_shell(args: Args, config: Config) -> None:
 
             owner = os.stat(fname).st_uid
             if owner != 0:
-                cmdline += [f"--private-users={str(owner)}"]
+                # Let's allow running a shell in a non-ephemeral image but in that case only map a single user into the
+                # image so it can't get poluted with files or directories owned by other users.
+                if args.verb == Verb.shell and config.output_format == OutputFormat.directory and not config.ephemeral:
+                    range = 1
+                else:
+                    range = 65536
+
+                cmdline += [f"--private-users={owner}:{range}"]
         else:
             cmdline += ["--image", fname]
 
         if config.runtime_build_sources:
             with finalize_source_mounts(config, ephemeral=False) as mounts:
                 for mount in mounts:
-                    uidmap = "rootidmap" if Path(mount.src).stat().st_uid == INVOKING_USER.uid else "noidmap"
+                    uidmap = "rootidmap" if Path(mount.src).stat().st_uid != 0 else "noidmap"
                     cmdline += ["--bind", f"{mount.src}:{mount.dst}:norbind,{uidmap}"]
 
             if config.build_dir:
@@ -4215,7 +4171,7 @@ def run_shell(args: Args, config: Config) -> None:
             # source directory which would mean we'd be mounting the container root directory as a subdirectory in
             # itself which tends to lead to all kinds of weird issues, which we avoid by not doing a recursive mount
             # which means the container root directory mounts will be skipped.
-            uidmap = "rootidmap" if tree.source.stat().st_uid == INVOKING_USER.uid else "noidmap"
+            uidmap = "rootidmap" if tree.source.stat().st_uid != 0 else "noidmap"
             cmdline += ["--bind", f"{tree.source}:{target}:norbind,{uidmap}"]
 
         if config.runtime_scratch == ConfigFeature.enabled or (
@@ -4312,7 +4268,6 @@ def run_systemd_tool(tool: str, args: Args, config: Config) -> None:
         stdout=sys.stdout,
         env=os.environ | config.environment,
         log=False,
-        preexec_fn=become_root if not config.forward_journal else None,
         sandbox=config.sandbox(
             binary=tool_path,
             network=True,
@@ -4402,7 +4357,6 @@ def bump_image_version() -> None:
         logging.info(f"Increasing last component of version by one, bumping '{version}' → '{new_version}'.")
 
     Path("mkosi.version").write_text(f"{new_version}\n")
-    os.chown("mkosi.version", INVOKING_USER.uid, INVOKING_USER.gid)
 
 
 def show_docs(args: Args, *, resources: Path) -> None:
@@ -4485,7 +4439,6 @@ def finalize_default_tools(args: Args, config: Config, *, resources: Path) -> Co
         *(["--cache-dir", str(config.cache_dir)] if config.cache_dir else []),
         *(["--package-cache-dir", str(config.package_cache_dir)] if config.package_cache_dir else []),
         "--incremental", str(config.incremental),
-        "--acl", str(config.acl),
         *([f"--package={package}" for package in config.tools_tree_packages]),
         "--output", f"{config.tools_tree_distribution}-tools",
         *(["--source-date-epoch", str(config.source_date_epoch)] if config.source_date_epoch is not None else []),
@@ -4534,8 +4487,8 @@ def run_clean_scripts(config: Config) -> None:
         DISTRIBUTION_ARCHITECTURE=config.distribution.architecture(config.architecture),
         SRCDIR="/work/src",
         OUTPUTDIR="/work/out",
-        MKOSI_UID=str(INVOKING_USER.uid),
-        MKOSI_GID=str(INVOKING_USER.gid),
+        MKOSI_UID=str(os.getuid()),
+        MKOSI_GID=str(os.getgid()),
         MKOSI_CONFIG="/work/config.json",
     )
 
@@ -4580,7 +4533,7 @@ def needs_clean(args: Args, config: Config, force: int = 1) -> bool:
 
 
 def run_clean(args: Args, config: Config, *, resources: Path) -> None:
-    become_root()
+    acquire_privileges()
 
     # We remove any cached images if either the user used --force twice, or he/she called "clean" with it
     # passed once. Let's also remove the downloaded package cache if the user specified one additional
@@ -4649,18 +4602,6 @@ def run_clean(args: Args, config: Config, *, resources: Path) -> None:
     run_clean_scripts(config)
 
 
-@contextlib.contextmanager
-def rchown_package_manager_dirs(config: Config) -> Iterator[None]:
-    try:
-        yield
-    finally:
-        if INVOKING_USER.is_regular_user():
-            with complete_step("Fixing ownership of package manager cache directory"):
-                subdir = config.distribution.package_manager(config).subdir(config)
-                for d in ("cache", "lib"):
-                    INVOKING_USER.rchown(config.package_cache_dir_or_default() / d / subdir)
-
-
 def sync_repository_metadata(context: Context) -> None:
     if (
         context.config.cacheonly != Cacheonly.never and
@@ -4679,11 +4620,6 @@ def sync_repository_metadata(context: Context) -> None:
 
 
 def run_sync(args: Args, config: Config, *, resources: Path) -> None:
-    if os.getuid() == 0:
-        os.setgroups(INVOKING_USER.extra_groups())
-        os.setresgid(INVOKING_USER.gid, INVOKING_USER.gid, INVOKING_USER.gid)
-        os.setresuid(INVOKING_USER.uid, INVOKING_USER.uid, INVOKING_USER.uid)
-
     if not (p := config.package_cache_dir_or_default()).exists():
         p.mkdir(parents=True, exist_ok=True)
 
@@ -4717,11 +4653,13 @@ def run_sync(args: Args, config: Config, *, resources: Path) -> None:
 
 
 def run_build(args: Args, config: Config, *, resources: Path, package_dir: Optional[Path] = None) -> None:
-    if (uid := os.getuid()) != 0:
-        become_root()
+    if os.getuid() != 0:
+        acquire_privileges()
+
     unshare(CLONE_NEWNS)
-    if uid == 0:
-        run(["mount", "--make-rslave", "/"])
+
+    if os.getuid() == 0:
+        mount("", "/", "", MS_SLAVE|MS_REC, "")
 
     for p in (
         config.output_dir,
@@ -4734,65 +4672,35 @@ def run_build(args: Args, config: Config, *, resources: Path, package_dir: Optio
             continue
 
         p.mkdir(parents=True, exist_ok=True)
-        INVOKING_USER.chown(p)
 
     if config.build_dir:
-        # Make sure the build directory is owned by root (in the user namespace) so that the correct uid-mapping is
-        # applied if it is used in RuntimeTrees=
-        os.chown(config.build_dir, os.getuid(), os.getgid())
-
         # Discard setuid/setgid bits as these are inherited and can leak into the image.
         config.build_dir.chmod(stat.S_IMODE(config.build_dir.stat().st_mode) & ~(stat.S_ISGID|stat.S_ISUID))
 
     # For extra safety when running as root, remount a bunch of stuff read-only.
     # Because some build systems use output directories in /usr, we only remount
     # /usr read-only if the output directory is not relative to it.
-    if INVOKING_USER.invoked_as_root:
+    if os.getuid() == 0:
         remount = ["/etc", "/opt", "/boot", "/efi", "/media"]
         if not config.output_dir_or_cwd().is_relative_to("/usr"):
             remount += ["/usr"]
 
         for d in remount:
-            if Path(d).exists():
-                options = "ro" if d in ("/usr", "/opt") else "ro,nosuid,nodev,noexec"
-                run(["mount", "--rbind", d, d, "--options", options])
+            if not Path(d).exists():
+                continue
+
+            attrs = MOUNT_ATTR_RDONLY
+            if d not in ("/usr", "/opt"):
+                attrs |= MOUNT_ATTR_NOSUID|MOUNT_ATTR_NODEV|MOUNT_ATTR_NOEXEC
+
+            mount_rbind(d, d, attrs)
 
     with (
         complete_step(f"Building {config.name()} image"),
         prepend_to_environ_path(config),
-        acl_toggle_build(config, INVOKING_USER.uid),
-        rchown_package_manager_dirs(config),
         setup_workspace(args, config) as workspace,
     ):
         build_image(Context(args, config, workspace=workspace, resources=resources, package_dir=package_dir))
-
-
-def ensure_root_is_mountpoint() -> None:
-    """
-    bubblewrap uses pivot_root() which doesn't work in the initramfs as pivot_root() requires / to be a mountpoint
-    which is not the case in the initramfs. So, to make sure mkosi works from within the initramfs, let's make / a
-    mountpoint by recursively bind-mounting / (the directory) to another location and then switching root into the bind
-    mount directory.
-    """
-    fstype = run(
-        ["findmnt", "--target", "/", "--output", "FSTYPE", "--noheadings"],
-        stdout=subprocess.PIPE,
-    ).stdout.strip()
-
-    if fstype != "rootfs":
-        return
-
-    if os.getuid() != 0:
-        die("mkosi can only be run as root from the initramfs")
-
-    unshare(CLONE_NEWNS)
-    run(["mount", "--make-rslave", "/"])
-    mountpoint = Path("/run/mkosi/mkosi-root")
-    mountpoint.mkdir(parents=True, exist_ok=True)
-    run(["mount", "--rbind", "/", mountpoint])
-    os.chdir(mountpoint)
-    run(["mount", "--move", ".", "/"])
-    os.chroot(".")
 
 
 def run_verb(args: Args, images: Sequence[Config], *, resources: Path) -> None:
@@ -4841,8 +4749,6 @@ def run_verb(args: Args, images: Sequence[Config], *, resources: Path) -> None:
 
         page(text, args.pager)
         return
-
-    ensure_root_is_mountpoint()
 
     if args.verb in (Verb.journalctl, Verb.coredumpctl, Verb.ssh):
         # We don't use a tools tree for verbs that don't need an image build.
@@ -4953,21 +4859,24 @@ def run_verb(args: Args, images: Sequence[Config], *, resources: Path) -> None:
         die(f"Image '{last.name()}' has not been built yet",
             hint="Make sure to build the image first with 'mkosi build' or use '--force'")
 
-    with prepend_to_environ_path(last):
-        with (
-            acl_toggle_boot(last, INVOKING_USER.uid)
-            if args.verb in (Verb.shell, Verb.boot)
-            else contextlib.nullcontext()
-        ):
-            run_vm = {
-                Vmm.qemu: run_qemu,
-                Vmm.vmspawn: run_vmspawn,
-            }[last.vmm]
+    if (
+        last.output_format == OutputFormat.directory and
+        (last.output_dir_or_cwd() / last.output).stat().st_uid == 0 and
+        os.getuid() != 0
+    ):
+        die("Cannot operate on directory images built as root when running unprivileged",
+            hint="Clean the root owned image by running mkosi -ff clean as root and then rebuild the image")
 
-            {
-                Verb.shell: run_shell,
-                Verb.boot: run_shell,
-                Verb.qemu: run_vm,
-                Verb.serve: run_serve,
-                Verb.burn: run_burn,
-            }[args.verb](args, last)
+    with prepend_to_environ_path(last):
+        run_vm = {
+            Vmm.qemu: run_qemu,
+            Vmm.vmspawn: run_vmspawn,
+        }[last.vmm]
+
+        {
+            Verb.shell: run_shell,
+            Verb.boot: run_shell,
+            Verb.qemu: run_vm,
+            Verb.serve: run_serve,
+            Verb.burn: run_burn,
+        }[args.verb](args, last)

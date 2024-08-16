@@ -6,14 +6,14 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Optional
 
+from mkosi.cage import umask
 from mkosi.config import PACKAGE_GLOBS, Config, ConfigFeature
 from mkosi.context import Context
 from mkosi.installer import PackageManager
 from mkosi.log import die
 from mkosi.run import run
-from mkosi.sandbox import Mount, apivfs_cmd
+from mkosi.sandbox import Mount
 from mkosi.types import _FILE, CompletedProcess, PathString
-from mkosi.util import umask
 
 
 @dataclasses.dataclass(frozen=True)
@@ -68,9 +68,11 @@ class Apt(PackageManager):
 
     @classmethod
     def scripts(cls, context: Context) -> dict[str, list[PathString]]:
+        cmd = cls.apivfs_script_cmd(context)
+
         return {
             **{
-                command: apivfs_cmd() + cls.env_cmd(context) + cls.cmd(context, command) for command in (
+                command: cmd + cls.env_cmd(context) + cls.cmd(context, command) for command in (
                     "apt",
                     "apt-cache",
                     "apt-cdrom",
@@ -83,7 +85,7 @@ class Apt(PackageManager):
                 )
             },
             **{
-                command: apivfs_cmd() + cls.dpkg_cmd(command) for command in(
+                command: cmd + cls.dpkg_cmd(command) for command in(
                     "dpkg",
                     "dpkg-query",
                 )
@@ -219,7 +221,7 @@ class Apt(PackageManager):
                     network=True,
                     vartmp=True,
                     mounts=[Mount(context.root, "/buildroot"), *cls.mounts(context), *mounts],
-                    extra=apivfs_cmd() if apivfs else []
+                    options=cls.options(root=context.root, apivfs=apivfs),
                 )
             ),
             env=context.config.environment | cls.finalize_environment(context),

@@ -9,7 +9,7 @@ from mkosi.context import Context
 from mkosi.installer import PackageManager
 from mkosi.installer.rpm import RpmRepository, rpm_cmd
 from mkosi.run import run
-from mkosi.sandbox import Mount, apivfs_cmd
+from mkosi.sandbox import Mount
 from mkosi.types import _FILE, CompletedProcess, PathString
 
 
@@ -36,8 +36,8 @@ class Zypper(PackageManager):
         ]
 
         return {
-            "zypper": apivfs_cmd() + cls.env_cmd(context) + cls.cmd(context),
-            "rpm"   : apivfs_cmd() + rpm_cmd(),
+            "zypper": cls.apivfs_script_cmd(context) + cls.env_cmd(context) + cls.cmd(context),
+            "rpm"   : cls.apivfs_script_cmd(context) + rpm_cmd(),
             "mkosi-install"  : install,
             "mkosi-upgrade"  : ["zypper", "update"],
             "mkosi-remove"   : ["zypper", "remove", "--clean-deps"],
@@ -134,7 +134,7 @@ class Zypper(PackageManager):
                     network=True,
                     vartmp=True,
                     mounts=[Mount(context.root, "/buildroot"), *cls.mounts(context)],
-                    extra=apivfs_cmd() if apivfs else [],
+                    options=cls.options(root=context.root, apivfs=apivfs),
                 )
             ),
             env=context.config.environment | cls.finalize_environment(context),

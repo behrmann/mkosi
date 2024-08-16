@@ -9,7 +9,7 @@ from mkosi.installer import PackageManager
 from mkosi.installer.rpm import RpmRepository, rpm_cmd
 from mkosi.log import ARG_DEBUG
 from mkosi.run import run
-from mkosi.sandbox import Mount, apivfs_cmd
+from mkosi.sandbox import Mount
 from mkosi.types import _FILE, CompletedProcess, PathString
 
 
@@ -35,8 +35,8 @@ class Dnf(PackageManager):
     @classmethod
     def scripts(cls, context: Context) -> dict[str, list[PathString]]:
         return {
-            "dnf": apivfs_cmd() + cls.env_cmd(context) + cls.cmd(context),
-            "rpm": apivfs_cmd() + rpm_cmd(),
+            "dnf": cls.apivfs_script_cmd(context) + cls.env_cmd(context) + cls.cmd(context),
+            "rpm": cls.apivfs_script_cmd(context) + rpm_cmd(),
             "mkosi-install"  : ["dnf", "install"],
             "mkosi-upgrade"  : ["dnf", "upgrade"],
             "mkosi-remove"   : ["dnf", "remove"],
@@ -200,7 +200,7 @@ class Dnf(PackageManager):
                         network=True,
                         vartmp=True,
                         mounts=[Mount(context.root, "/buildroot"), *cls.mounts(context)],
-                        extra=apivfs_cmd() if apivfs else [],
+                        options=cls.options(root=context.root, apivfs=apivfs),
                     )
                 ),
                 env=context.config.environment | cls.finalize_environment(context),

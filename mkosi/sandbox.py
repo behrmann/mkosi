@@ -1,31 +1,31 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 import contextlib
 import dataclasses
-import enum
-import logging
 import os
 import shutil
+import sys
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Optional, Protocol
 
+# Import mkosi.cage so we can figure out its path which we need to be able to execute it.
+import mkosi.cage
 from mkosi.types import PathString
 from mkosi.user import INVOKING_USER
-from mkosi.util import flatten, one_zero, startswith
+from mkosi.util import flatten, one_zero
 
 
 @dataclasses.dataclass(frozen=True)
 class Mount:
     src: PathString
     dst: PathString
-    devices: bool = False
     ro: bool = False
     required: bool = True
 
     def __hash__(self) -> int:
-        return hash((Path(self.src), Path(self.dst), self.devices, self.ro, self.required))
+        return hash((Path(self.src), Path(self.dst), self.ro, self.required))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Mount):
@@ -34,9 +34,7 @@ class Mount:
         return self.__hash__() == other.__hash__()
 
     def options(self) -> list[str]:
-        if self.devices:
-            opt = "--dev-bind" if self.required else "--dev-bind-try"
-        elif self.ro:
+        if self.ro:
             opt = "--ro-bind" if self.required else "--ro-bind-try"
         else:
             opt = "--bind" if self.required else "--bind-try"
@@ -51,7 +49,6 @@ class SandboxProtocol(Protocol):
         binary: Optional[PathString],
         vartmp: bool = False,
         mounts: Sequence[Mount] = (),
-        extra: Sequence[PathString] = (),
     ) -> AbstractContextManager[list[PathString]]: ...
 
 
@@ -60,26 +57,8 @@ def nosandbox(
     binary: Optional[PathString],
     vartmp: bool = False,
     mounts: Sequence[Mount] = (),
-    extra: Sequence[PathString] = (),
 ) -> AbstractContextManager[list[PathString]]:
     return contextlib.nullcontext([])
-
-
-# https://github.com/torvalds/linux/blob/master/include/uapi/linux/capability.h
-class Capability(enum.Enum):
-    CAP_NET_ADMIN = 12
-
-
-def have_effective_cap(capability: Capability) -> bool:
-    for line in Path("/proc/self/status").read_text().splitlines():
-        if rhs := startswith(line, "CapEff:"):
-            hexcap = rhs.strip()
-            break
-    else:
-        logging.warning(f"\"CapEff:\" not found in /proc/self/status, assuming we don't have {capability}")
-        return False
-
-    return (int(hexcap, 16) & (1 << capability.value)) != 0
 
 
 def finalize_passwd_mounts(root: PathString) -> list[Mount]:
@@ -101,7 +80,6 @@ def finalize_mounts(mounts: Sequence[Mount]) -> list[PathString]:
         m for m in mounts
         if not any(
             m != n and
-            m.devices == n.devices and
             m.ro == n.ro and
             m.required == n.required and
             Path(m.src).is_relative_to(n.src) and
@@ -111,9 +89,14 @@ def finalize_mounts(mounts: Sequence[Mount]) -> list[PathString]:
         )
     ]
 
-    mounts = sorted(mounts, key=lambda m: (Path(m.dst), m.devices, not m.ro, m.required, Path(m.src)))
-
     return flatten(m.options() for m in mounts)
+
+
+def network_options(*, network: bool) -> list[PathString]:
+    return [
+        "--setenv", "SYSTEMD_OFFLINE", one_zero(network),
+        *(["--unshare-net"] if not network else []),
+    ]
 
 
 @contextlib.contextmanager
@@ -126,9 +109,9 @@ def sandbox_cmd(
     tools: Path = Path("/"),
     relaxed: bool = False,
     mounts: Sequence[Mount] = (),
+    usroverlaydirs: Sequence[PathString] = (),
     options: Sequence[PathString] = (),
     setup: Sequence[PathString] = (),
-    extra: Sequence[PathString] = (),
 ) -> Iterator[list[PathString]]:
     cmdline: list[PathString] = []
     mounts = list(mounts)
@@ -141,19 +124,28 @@ def sandbox_cmd(
 
     cmdline += [
         *setup,
-        "bwrap",
-        *(
-            ["--unshare-net"]
-            if not network and (os.getuid() != 0 or have_effective_cap(Capability.CAP_NET_ADMIN))
-            else []
-        ),
-        "--die-with-parent",
+        sys.executable, "-SI", mkosi.cage.__file__,
         "--proc", "/proc",
-        "--setenv", "SYSTEMD_OFFLINE", one_zero(network),
         # We mounted a subdirectory of TMPDIR to /var/tmp so we unset TMPDIR so that /tmp or /var/tmp are used instead.
         "--unsetenv", "TMPDIR",
+        *network_options(network=network),
     ]
-    mounts += [Mount(tools / "usr", "/usr", ro=True)]
+
+    mounts += [
+        # apivfs_cmd() and chroot_cmd() are executed from within the sandbox, but they still use cage.py, so we make
+        # sure it is available inside the sandbox so it can be executed there as well.
+        Mount(Path(mkosi.cage.__file__), "/cage.py", ro=True)
+    ]
+
+    if usroverlaydirs:
+        cmdline += ["--overlay-src", tools / "usr"]
+
+        for d in usroverlaydirs:
+            cmdline += ["--overlay-src", d]
+
+        cmdline += ["--overlay", "/usr"]
+    else:
+        mounts += Mount(tools / "usr", "/usr", ro=True),
 
     if relaxed:
         mounts += [Mount("/tmp", "/tmp")]
@@ -167,7 +159,7 @@ def sandbox_cmd(
         mounts += [
             Mount("/sys", "/sys"),
             Mount("/run", "/run"),
-            Mount("/dev", "/dev", devices=True),
+            Mount("/dev", "/dev"),
         ]
     else:
         cmdline += ["--dev", "/dev"]
@@ -196,7 +188,7 @@ def sandbox_cmd(
 
     for d in ("bin", "sbin", "lib", "lib32", "lib64"):
         if (p := tools / d).is_symlink():
-            cmdline += ["--symlink", p.readlink(), Path("/") / p.relative_to(tools)]
+            cmdline += ["--symlink", p.readlink(), Path('/') / p.relative_to(tools)]
         elif p.is_dir():
             mounts += [Mount(p, Path("/") / p.relative_to(tools), ro=True)]
 
@@ -223,24 +215,7 @@ def sandbox_cmd(
     if not any(Path(m.dst) == Path("/etc") for m in mounts):
         cmdline += ["--symlink", "../proc/self/mounts", "/etc/mtab"]
 
-    # bubblewrap creates everything with a restricted mode so relax stuff as needed.
-    ops = []
-    if not relaxed:
-        if not any(Path(m.dst) == Path("/tmp") for m in mounts):
-            ops += ["chmod 1777 /tmp"]
-        if not devices:
-            ops += ["chmod 1777 /dev/shm"]
-    if vartmpdir:
-        ops += ["chmod 1777 /var/tmp"]
-    if relaxed and INVOKING_USER.home().exists() and len(INVOKING_USER.home().parents) > 1:
-        # We might mount a subdirectory of /home so /home will be created with the wrong permissions by bubblewrap so
-        # we need to fix up the permissions.
-        ops += [f"chmod 755 {list(INVOKING_USER.home().parents)[-1]}"]
-    else:
-        ops += ["chmod 755 /etc"]
-    ops += ["exec $0 \"$@\""]
-
-    cmdline += ["sh", "-c", " && ".join(ops), *extra]
+    cmdline = [*cmdline, "--"]
 
     if vartmpdir:
         vartmpdir.mkdir(mode=0o1777)
@@ -252,61 +227,92 @@ def sandbox_cmd(
             shutil.rmtree(vartmpdir)
 
 
-def apivfs_cmd() -> list[PathString]:
+def apivfs_options(*, root: Path = Path("/buildroot")) -> list[PathString]:
     return [
-        "bwrap",
-        "--dev-bind", "/", "/",
-        "--tmpfs", "/buildroot/run",
-        "--tmpfs", "/buildroot/tmp",
-        "--bind", "/var/tmp", "/buildroot/var/tmp",
-        "--proc", "/buildroot/proc",
-        "--dev", "/buildroot/dev",
-        # Make sure /etc/machine-id is not overwritten by any package manager post install scripts.
-        "--ro-bind-try", "/buildroot/etc/machine-id", "/buildroot/etc/machine-id",
+        "--tmpfs", root / "run",
+        "--tmpfs", root / "tmp",
+        "--bind", "/var/tmp", root / "var/tmp",
+        "--proc", root / "proc",
+        "--dev", root / "dev",
         # Nudge gpg to create its sockets in /run by making sure /run/user/0 exists.
-        "--dir", "/buildroot/run/user/0",
-        *flatten(mount.options() for mount in finalize_passwd_mounts("/buildroot")),
-        "sh", "-c",
-        " && ".join(
-            [
-                "chmod 1777 /buildroot/tmp /buildroot/var/tmp /buildroot/dev/shm",
-                "chmod 755 /buildroot/run",
-                # Make sure anything running in the root directory thinks it's in a container. $container can't always
-                # be accessed so we write /run/host/container-manager as well which is always accessible.
-                "mkdir -m 755 /buildroot/run/host",
-                "echo mkosi >/buildroot/run/host/container-manager",
-                "exec $0 \"$@\"",
-            ]
-        ),
+        "--dir", root / "run/user/0",
+        # Make sure anything running in the root directory thinks it's in a container. $container can't always
+        # be accessed so we write /run/host/container-manager as well which is always accessible.
+        "--write", "mkosi", root / "run/host/container-manager",
     ]
 
 
-def chroot_cmd(*, resolve: bool = False, work: bool = False) -> list[PathString]:
-    workdir = "/buildroot/work" if work else ""
+def apivfs_script_cmd(*, tools: bool, options: Sequence[PathString] = ()) -> list[PathString]:
+    return [
+        "python3" if tools else sys.executable, "-SI", "/cage.py",
+        "--bind", "/", "/",
+        "--same-dir",
+        *apivfs_options(),
+        *options,
+        "--",
+    ]
 
-    return apivfs_cmd() + [
-        "sh", "-c",
-        " && ".join(
-            [
-                *([f"trap 'rm -rf {workdir}' EXIT"] if work else []),
-                # /etc/resolv.conf can be a dangling symlink to /run/systemd/resolve/stub-resolv.conf. Bubblewrap tries
-                # to call mkdir() on each component of the path which means it will try to call
-                # mkdir(/run/systemd/resolve/stub-resolv.conf) which will fail unless /run/systemd/resolve exists
-                # already so we make sure that it already exists.
-                f"mkdir -p -m 755 {workdir} /buildroot/run/systemd /buildroot/run/systemd/resolve",
-                # No exec here because we need to clean up the /work directory afterwards.
-                "$0 \"$@\"",
-            ]
-        ),
-        "bwrap",
-        "--dev-bind", "/buildroot", "/",
+
+def chroot_options(*, network: bool = False) -> list[PathString]:
+    return [
+        # Let's always run as (fake) root when we chroot inside the image as tools executed within the image could
+        # have builtin assumptions about files being owned by root.
+        "--become-root",
+        # Unshare IPC namespace so any tests that exercise IPC related features don't fail with permission errors as
+        # --become-root implies unsharing a user namespace which won't have access to the parent's IPC namespace
+        # anymore.
+        "--unshare-ipc",
         "--setenv", "container", "mkosi",
         "--setenv", "HOME", "/",
-        "--setenv", "PATH", "/work/scripts:/usr/bin:/usr/sbin",
-        *(["--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf"] if resolve else []),
-        *(["--bind", "/work", "/work", "--chdir", "/work/src"] if work else []),
+        "--setenv", "PATH", "/usr/bin:/usr/sbin",
+        *(["--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf"] if network else []),
         "--setenv", "BUILDROOT", "/",
-        # Start an interactive bash shell if we're not given any arguments.
-        "sh", "-c", '[ "$0" = "sh" ] && [ $# -eq 0 ] && exec bash -i || exec $0 "$@"',
     ]
 
+
+@contextlib.contextmanager
+def chroot_cmd(
+    *,
+    root: Path,
+    network: bool = False,
+    mounts: Sequence[Mount] = (),
+    options: Sequence[PathString] = (),
+) -> Iterator[list[PathString]]:
+    # We want to use an empty subdirectory in the host's temporary directory as the sandbox's /var/tmp.
+    vartmpdir = Path(os.getenv("TMPDIR", "/var/tmp")) / f"mkosi-var-tmp-{uuid.uuid4().hex[:16]}"
+
+    if vartmpdir:
+        vartmpdir.mkdir(mode=0o1777)
+
+    cmdline: list[PathString] = [
+        sys.executable, "-SI", mkosi.cage.__file__,
+        "--bind", root, "/",
+        "--bind", vartmpdir, "/var/tmp",
+        # We mounted a subdirectory of TMPDIR to /var/tmp so we unset TMPDIR so that /tmp or /var/tmp are used instead.
+        "--unsetenv", "TMPDIR",
+        *network_options(network=network),
+        *apivfs_options(root=Path("/")),
+        *chroot_options(network=network),
+        *finalize_mounts(mounts),
+        *options,
+    ]
+
+    if network and Path("/etc/resolv.conf").exists():
+        cmdline += ["--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"]
+
+    try:
+        yield cmdline + ["--"]
+    finally:
+        if vartmpdir:
+            shutil.rmtree(vartmpdir)
+
+
+def chroot_script_cmd(*, tools: bool, network: bool = False, work: bool = False) -> list[PathString]:
+    return [
+        "python3" if tools else sys.executable, "-SI", "/cage.py",
+        "--bind", "/buildroot", "/",
+        *apivfs_options(root=Path("/")),
+        *chroot_options(network=network),
+        *(["--bind", "/work", "/work", "--chdir", "/work/src"] if work else []),
+        "--",
+    ]

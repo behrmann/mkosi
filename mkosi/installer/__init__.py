@@ -6,10 +6,10 @@ from mkosi.config import Config, ConfigFeature, OutputFormat
 from mkosi.context import Context
 from mkosi.mounts import finalize_crypto_mounts
 from mkosi.run import find_binary
-from mkosi.sandbox import Mount
+from mkosi.sandbox import Mount, apivfs_options, apivfs_script_cmd, finalize_passwd_mounts
 from mkosi.tree import copy_tree, rmtree
 from mkosi.types import PathString
-from mkosi.util import startswith
+from mkosi.util import flatten, startswith
 
 
 class PackageManager:
@@ -96,6 +96,24 @@ class PackageManager:
                 ]
 
         return mounts
+
+    @classmethod
+    def options(cls, *, root: PathString, apivfs: bool = True) -> list[PathString]:
+        return [
+            *(apivfs_options() if apivfs else []),
+            "--become-root",
+            "--suppress-chown",
+            # Make sure /etc/machine-id is not overwritten by any package manager post install scripts.
+            "--ro-bind-try", "/buildroot/etc/machine-id", "/buildroot/etc/machine-id",
+            # If we're already in the sandbox, we want to pick up use the passwd files from /buildroot since the
+            # original root won't be available anymore. If we're not in the sandbox yet, we want to pick up the passwd
+            # files from the original root.
+            *flatten(m.options() for m in finalize_passwd_mounts(root)),
+        ]
+
+    @classmethod
+    def apivfs_script_cmd(cls, context: Context) -> list[PathString]:
+        return apivfs_script_cmd(tools=bool(context.config.tools_tree), options=cls.options(root="/buildroot"))
 
     @classmethod
     def sync(cls, context: Context, force: bool) -> None:

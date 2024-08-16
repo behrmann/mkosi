@@ -117,6 +117,8 @@ def fork_and_wait(target: Callable[..., None], *args: Any, **kwargs: Any) -> Non
 def log_process_failure(sandbox: Sequence[str], cmdline: Sequence[str], returncode: int) -> None:
     if returncode < 0:
         logging.error(f"Interrupted by {signal.Signals(-returncode).name} signal")
+    elif returncode == 127:
+        logging.error(f"{cmdline[0]} not found.")
     else:
         logging.error(
             f"\"{shlex.join([*sandbox, *cmdline] if ARG_DEBUG.get() else cmdline)}\" returned non-zero exit code "
@@ -134,40 +136,30 @@ def run(
     user: Optional[int] = None,
     group: Optional[int] = None,
     env: Mapping[str, str] = {},
-    cwd: Optional[Path] = None,
     log: bool = True,
     foreground: bool = True,
-    preexec_fn: Optional[Callable[[], None]] = None,
     success_exit_status: Sequence[int] = (0,),
     sandbox: AbstractContextManager[Sequence[PathString]] = contextlib.nullcontext([]),
-    scope: Sequence[str] = (),
 ) -> CompletedProcess:
     if input is not None:
         assert stdin is None  # stdin and input cannot be specified together
         stdin = subprocess.PIPE
 
-    try:
-        with spawn(
-            cmdline,
-            check=check,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            user=user,
-            group=group,
-            env=env,
-            cwd=cwd,
-            log=log,
-            foreground=foreground,
-            preexec_fn=preexec_fn,
-            success_exit_status=success_exit_status,
-            sandbox=sandbox,
-            scope=scope,
-            innerpid=False,
-        ) as (process, _):
-            out, err = process.communicate(input)
-    except FileNotFoundError:
-        return CompletedProcess(cmdline, 1, "", "")
+    with spawn(
+        cmdline,
+        check=check,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        user=user,
+        group=group,
+        env=env,
+        log=log,
+        foreground=foreground,
+        success_exit_status=success_exit_status,
+        sandbox=sandbox,
+    ) as process:
+        out, err = process.communicate(input)
 
     return CompletedProcess(cmdline, process.returncode, out, err)
 
@@ -183,15 +175,12 @@ def spawn(
     group: Optional[int] = None,
     pass_fds: Collection[int] = (),
     env: Mapping[str, str] = {},
-    cwd: Optional[Path] = None,
     log: bool = True,
     foreground: bool = False,
     preexec_fn: Optional[Callable[[], None]] = None,
     success_exit_status: Sequence[int] = (0,),
     sandbox: AbstractContextManager[Sequence[PathString]] = contextlib.nullcontext([]),
-    scope: Sequence[str] = (),
-    innerpid: bool = True,
-) -> Iterator[tuple[Popen, int]]:
+) -> Iterator[Popen]:
     assert sorted(set(pass_fds)) == list(pass_fds)
 
     cmdline = [os.fspath(x) for x in cmdline]
@@ -224,6 +213,10 @@ def spawn(
 
     if "HOME" not in env:
         env["HOME"] = "/"
+
+    # cage.py takes care of setting $LISTEN_PID
+    if pass_fds:
+        env["LISTEN_FDS"] = str(len(pass_fds))
 
     def preexec() -> None:
         if foreground:
@@ -259,51 +252,9 @@ def spawn(
     with sandbox as sbx:
         prefix = [os.fspath(x) for x in sbx]
 
-        # First, check if the sandbox works at all before executing the command.
-        if prefix and (rc := subprocess.run(prefix + ["true"]).returncode) != 0:
-            log_process_failure(prefix, cmdline, rc)
-            raise subprocess.CalledProcessError(rc, prefix + cmdline)
-
-        if subprocess.run(
-            prefix + ["sh", "-c", f"command -v {cmdline[0]}"],
-            stdout=subprocess.DEVNULL,
-        ).returncode != 0:
-            if check:
-                die(f"{cmdline[0]} not found.", hint=f"Is {cmdline[0]} installed on the host system?")
-
-            # We can't really return anything in this case, so we raise a specific exception that we can catch in
-            # run().
-            logging.debug(f"{cmdline[0]} not found, not running {shlex.join(cmdline)}")
-            raise FileNotFoundError(cmdline[0])
-
-        if (
-            foreground and
-            prefix and
-            subprocess.run(prefix + ["sh", "-c", "command -v setpgid"], stdout=subprocess.DEVNULL).returncode == 0
-        ):
-            prefix += ["setpgid", "--foreground", "--"]
-
-        if pass_fds:
-            # We don't know the PID before we start the process and we can't modify the environment in preexec_fn so we
-            # have to spawn a temporary shell to set the necessary environment variables before spawning the actual
-            # command.
-            prefix += ["sh", "-c", f"LISTEN_FDS={len(pass_fds)} LISTEN_PID=$$ exec $0 \"$@\""]
-
-        if prefix and innerpid:
-            r, w = os.pipe2(os.O_CLOEXEC)
-            # Make sure that the write end won't be overridden in preexec() when we're moving fds forward.
-            q = fcntl.fcntl(w, fcntl.F_DUPFD_CLOEXEC, SD_LISTEN_FDS_START + len(pass_fds) + 1)
-            os.close(w)
-            w = q
-            # dash doesn't support working with file descriptors higher than 9 so make sure we use bash.
-            innerpidcmd = ["bash", "-c", f"echo $$ >&{w} && exec {w}>&- && exec $0 \"$@\""]
-        else:
-            innerpidcmd = []
-            r, w = (None, None)
-
         try:
             with subprocess.Popen(
-                [*scope, *prefix, *innerpidcmd, *cmdline],
+                [*prefix, *cmdline],
                 stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,
@@ -312,24 +263,14 @@ def spawn(
                 group=group,
                 # pass_fds only comes into effect after python has invoked the preexec function, so we make sure that
                 # pass_fds contains the file descriptors to keep open after we've done our transformation in preexec().
-                pass_fds=[SD_LISTEN_FDS_START + i for i in range(len(pass_fds))] + ([w] if w else []),
+                pass_fds=[SD_LISTEN_FDS_START + i for i in range(len(pass_fds))],
                 env=env,
-                cwd=cwd,
                 preexec_fn=preexec,
             ) as proc:
-                if w:
-                    os.close(w)
-                pid = proc.pid
                 try:
-                    if r:
-                        with open(r) as f:
-                            s = f.read()
-                            if s:
-                                pid = int(s)
-
-                    yield proc, pid
+                    yield proc
                 except BaseException:
-                    kill(proc, pid, signal.SIGTERM)
+                    proc.terminate()
                     raise
                 finally:
                     returncode = proc.wait()
@@ -339,14 +280,13 @@ def spawn(
                         log_process_failure(prefix, cmdline, returncode)
                     if ARG_DEBUG_SHELL.get():
                         subprocess.run(
-                            [*scope, *prefix, "bash"],
+                            [*prefix, "bash"],
                             check=False,
                             stdin=sys.stdin,
                             text=True,
                             user=user,
                             group=group,
                             env=env,
-                            cwd=cwd,
                             preexec_fn=preexec,
                         )
                     raise subprocess.CalledProcessError(returncode, cmdline)
@@ -383,18 +323,6 @@ def find_binary(*names: PathString, root: Path = Path("/"), extra: Sequence[Path
                 return Path("/") / Path(binary).relative_to(root)
 
     return None
-
-
-def kill(process: Popen, innerpid: int, signal: int) -> None:
-    process.poll()
-    if process.returncode is not None:
-        return
-
-    try:
-        os.kill(innerpid, signal)
-    # Handle the race condition where the process might exit between us calling poll() and us calling os.kill().
-    except ProcessLookupError:
-        pass
 
 
 class AsyncioThread(threading.Thread):

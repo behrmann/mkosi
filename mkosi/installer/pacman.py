@@ -6,13 +6,13 @@ import textwrap
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+from mkosi.cage import umask
 from mkosi.config import Config
 from mkosi.context import Context
 from mkosi.installer import PackageManager
 from mkosi.run import run
-from mkosi.sandbox import Mount, apivfs_cmd
+from mkosi.sandbox import Mount
 from mkosi.types import _FILE, CompletedProcess, PathString
-from mkosi.util import umask
 from mkosi.versioncomp import GenericVersion
 
 
@@ -42,7 +42,7 @@ class Pacman(PackageManager):
     @classmethod
     def scripts(cls, context: Context) -> dict[str, list[PathString]]:
         return {
-            "pacman": apivfs_cmd() + cls.env_cmd(context) + cls.cmd(context),
+            "pacman": cls.apivfs_script_cmd(context) + cls.env_cmd(context) + cls.cmd(context),
             "mkosi-install"  : ["pacman", "--sync", "--needed"],
             "mkosi-upgrade"  : ["pacman", "--sync", "--sysupgrade", "--needed"],
             "mkosi-remove"   : ["pacman", "--remove", "--recursive", "--nosave"],
@@ -172,7 +172,7 @@ class Pacman(PackageManager):
                     network=True,
                     vartmp=True,
                     mounts=[Mount(context.root, "/buildroot"), *cls.mounts(context)],
-                    extra=apivfs_cmd() if apivfs else [],
+                    options=cls.options(root=context.root, apivfs=apivfs),
                 )
             ),
             env=context.config.environment | cls.finalize_environment(context),
