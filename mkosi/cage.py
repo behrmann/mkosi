@@ -502,68 +502,42 @@ def main() -> None:
     chdir = None
     flags = 0
 
-    def parse_fsops_one(arg: str) -> None:
-        fsops.append((arg, (argv.pop(),)))
-
-    def parse_fsops_two(arg: str) -> None:
-        fsops.append((arg, (argv.pop(), argv.pop())))
-
-    def parse_chdir(arg: str) -> None:
-        nonlocal chdir
-        chdir = argv.pop()
-
-    def parse_same_dir(arg: str) -> None:
-        nonlocal chdir
-        chdir = os.getcwd()
-
-    def parse_flag(arg: str) -> None:
-        nonlocal flags
-        flags |= {
-            "become-root"    : ARG_BECOME_ROOT,
-            "suppress-chown" : ARG_SUPPRESS_CHOWN,
-            "unshare-net"    : ARG_UNSHARE_NET,
-            "unshare-ipc"    : ARG_UNSHARE_IPC,
-        }[arg]
-
-    lookup = {
-        "--tmpfs"          : parse_fsops_one,
-        "--dev"            : parse_fsops_one,
-        "--proc"           : parse_fsops_one,
-        "--dir"            : parse_fsops_one,
-        "--bind"           : parse_fsops_two,
-        "--ro-bind"        : parse_fsops_two,
-        "--bind-try"       : parse_fsops_two,
-        "--ro-bind-try"    : parse_fsops_two,
-        "--symlink"        : parse_fsops_two,
-        "--write"          : parse_fsops_two,
-        "--overlay-src"    : lambda arg: lowerdirs.append(argv.pop()),
-        "--overlay"        : lambda arg: fsops.append((arg, (*pop_all(lowerdirs), argv.pop()))),
-        "--unsetenv"       : lambda arg: unsetenv.append(argv.pop()),
-        "--setenv"         : lambda arg: setenv.append((argv.pop(), argv.pop())),
-        "--chdir"          : parse_chdir,
-        "--same-dir"       : parse_same_dir,
-        "--become-root"    : parse_flag,
-        "--suppress-chown" : parse_flag,
-        "--unshare-net"    : parse_flag,
-        "--unshare-ipc"    : parse_flag,
-    }
-
-    while len(argv) > 0:
+    while argv:
         arg = argv.pop()
 
         if arg == '--':
             break
 
-        if parse := lookup.get(arg):
-            parse(arg.removeprefix("--"))
+        if arg in ("--tmpfs", "--dev", "--proc", "--dir"):
+            fsops.append((arg, (argv.pop(),)))
+        elif arg in ("--bind", "--ro-bind", "--bind-try", "--ro-bind-try", "--symlink", "--write"):
+            fsops.append((arg, (argv.pop(), argv.pop())))
+        elif arg == "--overlay-src":
+            lowerdirs.append(argv.pop())
+        elif arg == "--overlay":
+            fsops.append((arg, (*pop_all(lowerdirs), argv.pop())))
+        elif arg == "--unsetenv":
+            unsetenv.append(argv.pop())
+        elif arg == "--setenv":
+            setenv.append((argv.pop(), argv.pop()))
+        elif arg == "--chdir":
+            chdir = argv.pop()
+        elif arg == "--same-dir":
+            chdir = os.getcwd()
+        elif arg in ("--become-root", "--suppress-chown", "--unshare-net", "--unshare-ipc"):
+            flags |= {
+                "become-root"    : ARG_BECOME_ROOT,
+                "suppress-chown" : ARG_SUPPRESS_CHOWN,
+                "unshare-net"    : ARG_UNSHARE_NET,
+                "unshare-ipc"    : ARG_UNSHARE_IPC,
+            }[arg]
         else:
             argv.append(arg)
             break
 
     argv.reverse()
 
-    if len(argv) == 0:
-        argv = ["bash"]
+    argv = argv or ["bash"]
 
     # Make sure all destination paths are absolute.
     for option, args in fsops:
