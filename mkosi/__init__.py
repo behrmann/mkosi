@@ -4424,11 +4424,13 @@ def show_docs(args: Args, *, resources: Path) -> None:
     else:
         formats = [args.doc_format]
 
+    manual = args.cmdline[0] if args.cmdline else "mkosi"
+
     while formats:
         form = formats.pop(0)
         try:
             if form == DocFormat.man:
-                man = resources / "mkosi.1"
+                man = resources / f"{manual}.1"
                 if not man.exists():
                     raise FileNotFoundError()
                 run(["man", "--local-file", man])
@@ -4436,14 +4438,14 @@ def show_docs(args: Args, *, resources: Path) -> None:
             elif form == DocFormat.pandoc:
                 if not find_binary("pandoc"):
                     logging.error("pandoc is not available")
-                pandoc = run(["pandoc", "-t", "man", "-s", resources / "mkosi.md"], stdout=subprocess.PIPE)
+                pandoc = run(["pandoc", "-t", "man", "-s", resources / f"{manual}.md"], stdout=subprocess.PIPE)
                 run(["man", "--local-file", "-"], input=pandoc.stdout)
                 return
             elif form == DocFormat.markdown:
-                page((resources / "mkosi.md").read_text(), args.pager)
+                page((resources / f"{manual}.md").read_text(), args.pager)
                 return
             elif form == DocFormat.system:
-                run(["man", "mkosi"])
+                run(["man", manual])
                 return
         except (FileNotFoundError, subprocess.CalledProcessError) as e:
             if not formats:
