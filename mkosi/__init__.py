@@ -1946,7 +1946,7 @@ def finalize_cmdline(
     else:
         cmdline = []
 
-    if roothash:
+    if roothash and not any("mkosi.skiproothash" in cmdline):
         cmdline += [roothash]
 
     cmdline += context.config.kernel_command_line
