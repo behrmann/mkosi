@@ -108,12 +108,18 @@ def copy_tree(
         "--bind", dst.parent, workdir(dst.parent, sandbox),
     ]  # fmt: skip
 
-    attrs = "mode,links"
+    attrs = ["mode", "links"]
     if preserve:
-        attrs += ",timestamps,ownership"
+        preserve_attr = os.environ.get("MKOSI__CP_PRESERVE_ATTR", "timestamps,ownership,xattr").split(",")
 
+        if "timestamps" in preserve_attr:
+            attrs += ["timestamps"]
+        if "ownership" in preserve_attr:
+            attrs += ["ownership"]
         # Trying to copy selinux xattrs to overlayfs fails with "Operation not supported" in containers.
-        if statfs(os.fspath(dst.parent)) != OVERLAYFS_SUPER_MAGIC or not tree_has_selinux_xattr(src):
+        if "xattr" in preserve_attr and (
+            statfs(os.fspath(dst.parent)) != OVERLAYFS_SUPER_MAGIC or not tree_has_selinux_xattr(src)
+        ):
             attrs += ",xattr"
 
     def copy() -> None:
@@ -132,7 +138,7 @@ def copy_tree(
             "cp",
             "--recursive",
             "--dereference" if dereference else "--no-dereference",
-            f"--preserve={attrs}",
+            f"--preserve={','.join(attrs)}",
             "--reflink=auto",
             "--copy-contents",
             workdir(src, sandbox),
