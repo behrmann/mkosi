@@ -709,6 +709,7 @@ def parse_path(
     directory: bool = False,
     exclude: Sequence[PathString] = (),
     constants: Sequence[str] = (),
+    unexp_value: Optional[str] = None,
 ) -> Path:
     if value in constants:
         return Path(value)
@@ -721,7 +722,13 @@ def parse_path(
     if expanduser:
         path = path.expanduser()
 
-    if required:
+    if required and (
+        value == unexp_value
+        or (
+            unexp_value
+            and not unexp_value.startswith(f"%{SETTINGS_LOOKUP_BY_NAME['OutputDirectory'].specifier}")
+        )
+    ):
         if not path.exists():
             die(f"{value} does not exist")
 
@@ -1378,6 +1385,7 @@ def config_make_path_parser(
             secret=secret,
             absolute=absolute,
             constants=constants,
+            unexp_value=unexp_value,
         )
 
     return config_parse_path
