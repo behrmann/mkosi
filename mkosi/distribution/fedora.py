@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
+import logging
 import re
 import subprocess
 import tempfile
@@ -55,6 +56,9 @@ def find_fedora_rpm_gpgkeys(context: Context) -> Iterable[str]:
             die(f"Missing Fedora version in remote rawhide key {key} from distribution-gpg-keys")
 
         version = int(rawhide_will_be.group(1))
+        logging.debug(
+            f"Found key for fetched version {DISTRIBUTION_GPG_KEYS_UPSTREAM}/RPM-GPG-KEY-fedora-{version}-primary"  # noqa: E501
+        )
         yield f"{DISTRIBUTION_GPG_KEYS_UPSTREAM}/RPM-GPG-KEY-fedora-{version}-primary"
 
         # Also use the N+1 key if it exists to avoid issues when rawhide has been moved to the next key but
@@ -68,6 +72,9 @@ def find_fedora_rpm_gpgkeys(context: Context) -> Iterable[str]:
                     log=False,
                 )
 
+            logging.debug(
+                f"Found key for fetched version+1 {DISTRIBUTION_GPG_KEYS_UPSTREAM}/RPM-GPG-KEY-fedora-{version}-primary"  # noqa: E501
+            )
             yield f"{DISTRIBUTION_GPG_KEYS_UPSTREAM}/RPM-GPG-KEY-fedora-{version + 1}-primary"
         except subprocess.CalledProcessError:
             pass
@@ -80,6 +87,7 @@ def find_fedora_rpm_gpgkeys(context: Context) -> Iterable[str]:
         fallback=f"{DISTRIBUTION_GPG_KEYS_UPSTREAM}/RPM-GPG-KEY-fedora-{release}-primary",
     )
 
+    logging.debug(f"Found release key {key}")
     yield key
 
     if release == "rawhide" and (rawhide_will_be := versionre.match(Path(key).name)):
@@ -96,6 +104,7 @@ def find_fedora_rpm_gpgkeys(context: Context) -> Iterable[str]:
             key=f"RPM-GPG-KEY-fedora-{version + i}-primary",
             required=False,
         ):
+            logging.debug(f"Found newer key {newerkey}")
             yield newerkey
             i += 1
 
